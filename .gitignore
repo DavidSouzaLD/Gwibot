@@ -1,9 +1,38 @@
+# Ambientes Virtuais Python
+.venv/
+env/
+venv/
+ENV/
+
+# Caches e Compilações Python
 __pycache__/
 *.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
 
-# Credenciais, histórico e perfil do Chrome ficam só nesta máquina.
-data/config.json
-data/logs.json
-data/offers.json
-data/state.json
-data/ml_profile/
+# Armazenamento de Dados Locais e Logs
+data/
+logs/
+*.log
+*.sqlite
+*.db
+
+# Sessões e Credenciais do Navegador (Sensível)
+.session/
+.playwright-browsers/
+
+# Arquivos de Configuração Local e Segredos
+.env
+.env.*
+!.env.example
+
+# IDEs e Editores
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db

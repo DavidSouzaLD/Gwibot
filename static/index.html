@@ -1,0 +1,755 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Gwibot — Linear Deal Intelligence &amp; Affiliate Engine</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+    <div class="app-layout">
+        <!-- Sidebar Linear Style -->
+        <aside class="app-sidebar" id="appSidebar">
+            <!-- Workspace / Brand Header -->
+            <div class="sidebar-header">
+                <a href="#" class="workspace-badge">
+                    <div class="workspace-icon">
+                        <!-- Lucide: Command -->
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3"/></svg>
+                    </div>
+                    <span class="workspace-name">Gwibot Affiliate Hub</span>
+                    <span class="workspace-plan">Pro</span>
+                </a>
+            </div>
+
+            <!-- Navigation Groups -->
+            <nav class="sidebar-nav">
+                <!-- Navigation Group: Core Flow -->
+                <div class="nav-group">
+                    <span class="nav-label">Navegação Principal</span>
+                    <button type="button" class="nav-item nav-pill active" data-section="sec-search" id="pillSearch">
+                        <!-- Lucide: Search -->
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+                        <span>Pesquisa &amp; Extração</span>
+                    </button>
+                    <button type="button" class="nav-item nav-pill" data-section="sec-cycles" id="pillCycles">
+                        <!-- Lucide: Repeat -->
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/></svg>
+                        <span>Ciclos Automatizados</span>
+                        <span class="nav-badge" id="navActiveCyclesCount">0</span>
+                    </button>
+                    <button type="button" class="nav-item nav-pill" data-section="sec-affiliates" id="pillAffiliates">
+                        <!-- Lucide: Link -->
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+                        <span>Fontes de Afiliado</span>
+                    </button>
+                    <button type="button" class="nav-item nav-pill" data-section="sec-config" id="pillConfig">
+                        <!-- Lucide: Send / Share -->
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" x2="11" y1="2" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                        <span>Destinos de Publicação</span>
+                    </button>
+                    <button type="button" class="nav-item nav-pill" data-section="sec-history" id="pillHistory">
+                        <!-- Lucide: Activity -->
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+                        <span>Histórico &amp; Métricas</span>
+                    </button>
+                </div>
+
+                <!-- Navigation Group: Sources -->
+                <div class="nav-group">
+                    <span class="nav-label">Marketplaces Conectados</span>
+                    <div class="nav-item active">
+                        <!-- Lucide: ShoppingBag -->
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4Z"/><path d="M3 6h18"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>
+                        <span>Mercado Livre BR</span>
+                        <span class="status-indicator">
+                            <span class="dot online"></span>
+                        </span>
+                    </div>
+                </div>
+
+                <!-- Navigation Group: Quick Views for Search -->
+                <div class="nav-group" id="sidebarViewsGroup">
+                    <span class="nav-label">Modo de Visualização</span>
+                    <button type="button" class="nav-item sidebar-view-tab" data-target-view="grid">
+                        <!-- Lucide: LayoutGrid -->
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/></svg>
+                        <span>Cards Compactos</span>
+                    </button>
+                    <button type="button" class="nav-item sidebar-view-tab" data-target-view="table">
+                        <!-- Lucide: Table -->
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18"/><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M3 9h18"/><path d="M3 15h18"/></svg>
+                        <span>Tabela Analítica</span>
+                    </button>
+                    <button type="button" class="nav-item sidebar-view-tab" data-target-view="json">
+                        <!-- Lucide: Code -->
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+                        <span>JSON Payload</span>
+                    </button>
+                </div>
+            </nav>
+
+            <!-- Sidebar Footer / Status Engine -->
+            <div class="sidebar-footer">
+                <div class="status-row">
+                    <span class="status-label">
+                        <!-- Lucide: Cpu -->
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="16" height="16" x="4" y="4" rx="2"/><rect width="6" height="6" x="9" y="9" rx="1"/><path d="M15 2v2"/><path d="M15 20v2"/><path d="M2 15h2"/><path d="M2 9h2"/><path d="M20 15h2"/><path d="M20 9h2"/><path d="M9 2v2"/><path d="M9 20v2"/></svg>
+                        Motor Scraper
+                    </span>
+                    <span class="status-indicator" id="healthBadge" title="Servidor FastAPI e Chromium">
+                        <span class="dot" id="healthDot"></span>
+                        <span id="healthText">Checando...</span>
+                    </span>
+                </div>
+
+                <div class="status-row">
+                    <span class="status-label">
+                        <!-- Lucide: KeyRound -->
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 18v3c0 .6.4 1 1 1h4v-3h3v-3h2l1.4-1.4a6.5 6.5 0 1 0-4-4Z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/></svg>
+                        Sessão ML
+                    </span>
+                    <span class="status-indicator" id="authBadge" title="Status da sessão persistente no Mercado Livre">
+                        <span class="dot" id="authDot"></span>
+                        <span id="authStateText">Checando...</span>
+                    </span>
+                </div>
+
+                <div class="session-actions">
+                    <button type="button" id="loginBtn" class="btn btn-auth-login" title="Abre janela Chromium isolada para autenticação manual">
+                        Autenticar
+                    </button>
+                    <button type="button" id="logoutBtn" class="btn btn-auth-logout" title="Limpar sessão persistida" disabled>
+                        Sair
+                    </button>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content Area -->
+        <main class="app-main">
+            <!-- Header bar with breadcrumbs and linear shortcuts -->
+            <header class="top-header">
+                <div class="breadcrumb-area">
+                    <span class="crumb-root">Gwibot</span>
+                    <span class="crumb-separator">/</span>
+                    <span class="crumb-current" id="crumbCurrentTitle">Pesquisa &amp; Extração</span>
+                </div>
+
+                <div class="header-meta">
+                    <span class="kbd-shortcut" title="Atalho rápido para focar a busca">
+                        <span>/</span> ou <span>Ctrl+K</span>
+                    </span>
+                </div>
+            </header>
+
+            <!-- Scrollable Body -->
+            <div class="main-body" id="mainScrollableArea">
+                <!-- Notifications & Feedback (Linear Toast / Banner) -->
+                <div id="authFeedbackBanner" class="banner-notice info hidden" role="status" aria-live="polite">
+                    <div class="banner-content">
+                        <!-- Lucide: Info -->
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+                        <strong id="authFeedbackTitle">Sessão:</strong>
+                        <span id="authFeedbackMessage"></span>
+                    </div>
+                </div>
+
+                <div id="alertSection" class="banner-notice warning hidden" role="alert">
+                    <div class="banner-content">
+                        <!-- Lucide: AlertTriangle -->
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" x2="12" y1="9" y2="13"/><line x1="12" x2="12.01" y1="17" y2="17"/></svg>
+                        <strong id="alertTitle">Aviso:</strong>
+                        <span id="alertMessage"></span>
+                    </div>
+                </div>
+
+                <!-- ============================================================ -->
+                <!-- SEÇÃO 1: PESQUISA DIRETA E EXTRAÇÃO                          -->
+                <!-- ============================================================ -->
+                <div id="sec-search" class="app-section">
+                    <!-- Linear Command Search Bar -->
+                    <section class="search-container" id="searchSection">
+                        <form id="searchForm" autocomplete="off">
+                            <div class="search-input-row">
+                                <div class="search-icon-wrap">
+                                    <!-- Lucide: Search -->
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+                                </div>
+                                <input
+                                    type="text"
+                                    id="queryInput"
+                                    class="search-input"
+                                    name="query"
+                                    placeholder="Buscar produto ou nicho no Mercado Livre..."
+                                    value="mochila"
+                                    required
+                                    minlength="1"
+                                    maxlength="120"
+                                    spellcheck="false"
+                                />
+
+                                <div class="search-controls">
+                                    <div class="limit-control" title="Quantidade máxima de itens a extrair">
+                                        <label for="limitInput">Qtd</label>
+                                        <input
+                                            type="number"
+                                            id="limitInput"
+                                            class="limit-input"
+                                            name="limit"
+                                            min="1"
+                                            max="120"
+                                            value="20"
+                                            required
+                                        />
+                                    </div>
+
+                                    <button type="submit" id="submitBtn" class="btn btn-primary">
+                                        <span id="submitBtnText">Buscar</span>
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div class="search-meta-row">
+                                <div class="suggestions-list">
+                                    <span class="suggestions-title">Sugestões rápidas:</span>
+                                    <button type="button" class="chip" data-query="mochila">mochila</button>
+                                    <button type="button" class="chip" data-query="teclado mecanico">teclado mecânico</button>
+                                    <button type="button" class="chip" data-query="garrafa termica">garrafa térmica</button>
+                                    <button type="button" class="chip" data-query="mouse sem fio">mouse sem fio</button>
+                                </div>
+                                <div class="search-hint-text">
+                                    <span class="kbd-shortcut">Enter ↵</span>
+                                </div>
+                            </div>
+                        </form>
+                    </section>
+
+                    <!-- Loading State with Spinner -->
+                    <section id="loadingSection" class="hidden" aria-live="polite">
+                        <div class="loading-box">
+                            <div class="linear-spinner"></div>
+                            <div class="loading-text">
+                                <h4>Executando coleta em navegador Chromium isolado...</h4>
+                                <p id="loadingSubtext">Navegando no Mercado Livre, extraindo produtos e convertendo URLs em links de afiliado.</p>
+                            </div>
+                        </div>
+                    </section>
+
+                    <!-- Results Section -->
+                    <section id="resultsWrapper" class="hidden">
+                        <!-- Linear Filter & Metric Bar -->
+                        <div class="results-toolbar">
+                            <div class="metrics-strip">
+                                <div class="metric-pill">
+                                    <span class="label">Query:</span>
+                                    <span class="val" id="statQuery">—</span>
+                                </div>
+                                <div class="metric-divider"></div>
+                                <div class="metric-pill">
+                                    <span class="label">Coletados:</span>
+                                    <span class="val" id="statTotal">0</span>
+                                </div>
+                                <div class="metric-divider"></div>
+                                <div class="metric-pill">
+                                    <span class="label">Afiliados:</span>
+                                    <span class="val" id="statAffiliates">0</span>
+                                </div>
+                                <div class="metric-divider"></div>
+                                <div class="metric-pill">
+                                    <span class="label">Páginas / Tempo:</span>
+                                    <span class="val" id="statTime">0p / 0s</span>
+                                </div>
+                            </div>
+
+                            <div class="view-controls">
+                                <div class="view-switcher" role="group" aria-label="Modo de visualização">
+                                    <button type="button" class="btn-tab active" data-view="grid" title="Visualização em Cards">
+                                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/></svg>
+                                        <span>Cards</span>
+                                    </button>
+                                    <button type="button" class="btn-tab" data-view="table" title="Visualização em Tabela">
+                                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18"/><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M3 9h18"/><path d="M3 15h18"/></svg>
+                                        <span>Tabela</span>
+                                    </button>
+                                    <button type="button" class="btn-tab" data-view="json" title="Visualização JSON Raw">
+                                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+                                        <span>JSON</span>
+                                    </button>
+                                </div>
+
+                                <button type="button" id="copyJsonBtn" class="btn" title="Copiar JSON para a área de transferência">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+                                    <span>Copiar JSON</span>
+                                </button>
+                                <button type="button" id="downloadJsonBtn" class="btn" title="Baixar arquivo .json">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
+                                    <span>Exportar</span>
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Products Grid View -->
+                        <div id="gridView" class="products-grid"></div>
+
+                        <!-- Products Table View -->
+                        <div id="tableView" class="table-container hidden">
+                            <table class="products-table">
+                                <thead>
+                                    <tr>
+                                        <th>ID</th>
+                                        <th>Produto</th>
+                                        <th>Preço Original</th>
+                                        <th>Preço Promocional</th>
+                                        <th>Desconto</th>
+                                        <th>Avaliação</th>
+                                        <th>Status Afiliado</th>
+                                        <th>Links</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="tableBody"></tbody>
+                            </table>
+                        </div>
+
+                        <!-- Products JSON Raw View -->
+                        <div id="jsonView" class="json-container hidden">
+                            <div class="json-header">
+                                <span>GET /api/search response stream</span>
+                                <span id="endpointUrlDisplay" class="endpoint-pill"></span>
+                            </div>
+                            <pre id="jsonPre" class="json-pre"></pre>
+                        </div>
+                    </section>
+                </div>
+
+                <!-- ============================================================ -->
+                <!-- SEÇÃO 2: CICLOS AUTOMATIZADOS                                -->
+                <!-- ============================================================ -->
+                <div id="sec-cycles" class="app-section hidden">
+                    <div class="two-col-grid">
+                        <!-- Formulário de Criação / Edição de Ciclo -->
+                        <section class="card panel-pad" id="cycleFormCard">
+                            <div class="card-header-clean">
+                                <h3 class="section-title" id="cycleFormTitle">Criar Novo Ciclo Automatizado</h3>
+                                <p class="section-desc">Pipeline: <code>Busca &rarr; Filtros &rarr; Afiliado &rarr; Deduplicação &rarr; Destino</code></p>
+                            </div>
+                            <form id="cycleForm" class="stack-form">
+                                <input type="hidden" id="editingCycleId" value="" />
+
+                                <div class="form-row-2">
+                                    <div class="field-group">
+                                        <label for="cycleName">Nome da Campanha / Ciclo</label>
+                                        <input type="text" id="cycleName" class="linear-input" placeholder="Ex.: Ofertas Mochilas &amp; Notebooks" required />
+                                    </div>
+                                    <div class="field-group">
+                                        <label for="cycleSource">Fonte de Pesquisa</label>
+                                        <select id="cycleSource" class="linear-select">
+                                            <option value="mercadolivre">Mercado Livre Brasil (Ativo)</option>
+                                            <option value="shopee" disabled>Shopee Brasil (Em breve)</option>
+                                            <option value="amazon" disabled>Amazon Brasil (Em breve)</option>
+                                        </select>
+                                    </div>
+                                </div>
+
+                                <div class="field-group">
+                                    <div class="label-with-hint">
+                                        <label for="cycleQuery">Nichos / Palavras-Chave</label>
+                                        <span class="field-hint-inline">Separe por vírgula ou quebra de linha</span>
+                                    </div>
+                                    <textarea
+                                        id="cycleQuery"
+                                        rows="3"
+                                        class="linear-input linear-textarea"
+                                        placeholder="Ex.: notebook, mochila executiva&#10;monitor 144hz"
+                                        required
+                                    ></textarea>
+                                    <div id="cycleQueryTags" class="keyword-tags-preview" aria-live="polite"></div>
+                                </div>
+
+                                <div class="form-row-4">
+                                    <div class="field-group">
+                                        <label for="cycleSearchLimit" title="Quantidade buscada por palavra-chave">Qtd. Busca</label>
+                                        <input type="number" id="cycleSearchLimit" class="linear-input" min="1" max="120" value="20" required />
+                                    </div>
+                                    <div class="field-group">
+                                        <label for="cycleMaxOffers" title="Máximo de ofertas enviadas em cada execução do ciclo">Máx Ofertas/Exec</label>
+                                        <input type="number" id="cycleMaxOffers" class="linear-input" min="1" max="50" value="5" required />
+                                    </div>
+                                    <div class="field-group">
+                                        <label for="cycleInterval" title="Intervalo em minutos para o ciclo inteiro se repetir">Intervalo (min)</label>
+                                        <input type="number" id="cycleInterval" class="linear-input" min="1" max="10080" value="30" required />
+                                    </div>
+                                    <div class="field-group">
+                                        <label for="cycleProductDelay" title="Intervalo em segundos entre o envio de cada produto dentro da mesma execução">Tempo entre prod. (seg)</label>
+                                        <input type="number" step="1" id="cycleProductDelay" class="linear-input" min="0" max="86400" value="10" required />
+                                    </div>
+                                </div>
+
+                                <fieldset class="filter-fieldset">
+                                    <legend>Filtros de Qualificação</legend>
+                                    <div class="form-row-4">
+                                        <div class="field-group">
+                                            <label for="filterMinPrice">Preço Mín (R$)</label>
+                                            <input type="number" step="0.01" id="filterMinPrice" class="linear-input" placeholder="Opcional" />
+                                        </div>
+                                        <div class="field-group">
+                                            <label for="filterMaxPrice">Preço Máx (R$)</label>
+                                            <input type="number" step="0.01" id="filterMaxPrice" class="linear-input" placeholder="Opcional" />
+                                        </div>
+                                        <div class="field-group">
+                                            <label for="filterMinDiscount">Desc. Mín (%)</label>
+                                            <input type="number" min="0" max="95" id="filterMinDiscount" class="linear-input" placeholder="Ex.: 15" />
+                                        </div>
+                                        <div class="field-group">
+                                            <label for="filterMinRating">Nota Mín (0-5)</label>
+                                            <input type="number" step="0.1" min="0" max="5" id="filterMinRating" class="linear-input" placeholder="Ex.: 4.5" />
+                                        </div>
+                                    </div>
+                                    <div class="checkbox-row">
+                                        <label class="check-label">
+                                            <input type="checkbox" id="filterRequireAffiliate" checked />
+                                            <span>Exigir link de afiliado válido para publicar</span>
+                                        </label>
+                                        <label class="check-label">
+                                            <input type="checkbox" id="cycleDeduplicate" checked />
+                                            <span>Evitar ofertas duplicadas entre ciclos</span>
+                                        </label>
+                                    </div>
+                                </fieldset>
+
+                                <div class="field-group">
+                                    <label>Destinos de Publicação (Output Sources)</label>
+                                    <div id="cycleDestinationsCheckboxes" class="dest-checkbox-list">
+                                        <span class="null-pill">Carregando destinos...</span>
+                                    </div>
+                                </div>
+
+                                <div class="form-actions-row">
+                                    <button type="submit" id="cycleSubmitBtn" class="btn btn-primary">Salvar Ciclo Automatizado</button>
+                                    <button type="button" id="cancelCycleEditBtn" class="btn btn-secondary hidden">Cancelar Edição</button>
+                                </div>
+                            </form>
+                        </section>
+
+                        <!-- Lista de Campanhas / Ciclos -->
+                        <section class="card panel-pad">
+                            <div class="section-header-row">
+                                <div>
+                                    <h3 class="section-title">Campanhas Cadastradas</h3>
+                                    <p class="section-desc">Controle de estados, execuções manuais ou contínuas.</p>
+                                </div>
+                                <button type="button" id="refreshCyclesBtn" class="btn btn-secondary">Atualizar</button>
+                            </div>
+                            <div id="cyclesListContainer" class="cycles-list"></div>
+                        </section>
+                    </div>
+                </div>
+
+                <!-- ============================================================ -->
+                <!-- SEÇÃO 3: FONTES DE AFILIADO (MULTI-STORE EXTENSÍVEL)         -->
+                <!-- ============================================================ -->
+                <div id="sec-affiliates" class="app-section hidden">
+                    <div class="two-col-grid">
+                        <!-- Configuração Multi-Fonte de Afiliados -->
+                        <section class="card panel-pad">
+                            <div class="card-header-clean">
+                                <div class="section-header-row" style="margin-bottom: 6px;">
+                                    <h3 class="section-title" id="affProviderTitle">Fonte de Afiliado — Mercado Livre</h3>
+                                    <span class="status-pill running" id="affProviderStatusBadge">Ativo</span>
+                                </div>
+                                <p class="section-desc" id="affProviderDesc">
+                                    Credenciais oficiais do Programa de Afiliados (<code>matt_word</code> e <code>matt_tool</code>).
+                                </p>
+                            </div>
+
+                            <!-- Seletor de Lojas / Fontes de Afiliado (Extensível) -->
+                            <div class="field-group" style="margin-bottom: 12px;">
+                                <label>Selecionar Loja / Plataforma de Afiliado</label>
+                                <div class="store-tabs-bar" id="affiliateStoreTabs">
+                                    <button type="button" class="store-tab active" data-provider-tab="mercadolivre">
+                                        <span>Mercado Livre</span>
+                                        <span class="status-pill running">Ativo</span>
+                                    </button>
+                                    <button type="button" class="store-tab" data-provider-tab="shopee">
+                                        <span>Shopee</span>
+                                        <span class="status-pill paused">Futuro</span>
+                                    </button>
+                                    <button type="button" class="store-tab" data-provider-tab="amazon">
+                                        <span>Amazon</span>
+                                        <span class="status-pill paused">Futuro</span>
+                                    </button>
+                                </div>
+                            </div>
+
+                            <form id="affiliateConfigForm" class="stack-form">
+                                <input type="hidden" id="affProviderId" value="mercadolivre" />
+
+                                <div class="checkbox-row">
+                                    <label class="check-label">
+                                        <input type="checkbox" id="affEnabled" checked />
+                                        <span>Converter automaticamente URLs dos produtos em links afiliados nesta fonte</span>
+                                    </label>
+                                </div>
+
+                                <!-- Campos padrão Mercado Livre -->
+                                <div id="affMercadoLivreFields">
+                                    <div class="form-row-2">
+                                        <div class="field-group">
+                                            <label for="affMattWord">Etiqueta Oficial (<code>matt_word</code>)</label>
+                                            <input type="text" id="affMattWord" class="linear-input" placeholder="Ex.: meucanal2026" />
+                                        </div>
+                                        <div class="field-group">
+                                            <label for="affMattTool">ID da Ferramenta (<code>matt_tool</code> numérico)</label>
+                                            <input type="text" id="affMattTool" class="linear-input" placeholder="Ex.: 84729103" />
+                                        </div>
+                                    </div>
+
+                                    <div class="checkbox-row" style="margin-top: 10px;">
+                                        <label class="check-label">
+                                            <input type="checkbox" id="affUseLinkbuilder" />
+                                            <span>Tentar Linkbuilder oficial autenticado quando a sessão estiver conectada</span>
+                                        </label>
+                                    </div>
+                                </div>
+
+                                <!-- Container dinâmico para credenciais de novas lojas (Shopee, Amazon, etc.) -->
+                                <div id="affDynamicFieldsContainer" class="stack-form hidden"></div>
+
+                                <button type="submit" class="btn btn-primary">Salvar Configuração da Fonte</button>
+                            </form>
+                        </section>
+
+                        <!-- Testador de Conversão de Link Afiliado -->
+                        <section class="card panel-pad">
+                            <div class="card-header-clean">
+                                <h3 class="section-title">Testador de Conversão de Link Afiliado</h3>
+                                <p class="section-desc">Valide em tempo real a geração do link oficial de afiliado a partir de uma URL de produto.</p>
+                            </div>
+                            <form id="affiliateTestForm" class="stack-form">
+                                <div class="field-group">
+                                    <label for="affTestUrlInput">URL do Produto</label>
+                                    <div class="inline-test-form">
+                                        <input
+                                            type="url"
+                                            id="affTestUrlInput"
+                                            class="linear-input"
+                                            placeholder="https://produto.mercadolivre.com.br/MLB-123456789-produto-_JM"
+                                            required
+                                        />
+                                        <button type="submit" class="btn btn-secondary">Converter URL</button>
+                                    </div>
+                                </div>
+                            </form>
+                            <div id="affTestResultBox" class="code-result-box hidden"></div>
+                        </section>
+                    </div>
+                </div>
+
+                <!-- ============================================================ -->
+                <!-- SEÇÃO 4: DESTINOS DE PUBLICAÇÃO & TEMPLATES (INDEPENDENTE)   -->
+                <!-- ============================================================ -->
+                <div id="sec-config" class="app-section hidden">
+                    <div class="two-col-grid">
+                        <!-- Coluna 1: Gerenciamento e Edição de Destinos OutputSource -->
+                        <section class="card panel-pad">
+                            <div class="card-header-clean">
+                                <h3 class="section-title" id="destFormTitle">Destinos de Publicação (Output Sources)</h3>
+                                <p class="section-desc">Cadastre ou edite canais e grupos integrados via API para distribuição em tempo real.</p>
+                            </div>
+                            <form id="outputDestForm" class="stack-form">
+                                <input type="hidden" id="editingDestId" value="" />
+                                <div class="form-row-2">
+                                    <div class="field-group">
+                                        <label for="destName">Nome do Destino</label>
+                                        <input type="text" id="destName" class="linear-input" placeholder="Ex.: Canal Telegram Ofertas" required />
+                                    </div>
+                                    <div class="field-group">
+                                        <label for="destType">Plataforma (OutputSource)</label>
+                                        <select id="destType" class="linear-select">
+                                            <option value="telegram">Telegram (Bot API — Ativo)</option>
+                                            <option value="whatsapp">WhatsApp (Integração Futura)</option>
+                                        </select>
+                                    </div>
+                                </div>
+
+                                <div id="telegramFieldsGroup" class="form-row-2">
+                                    <div class="field-group">
+                                        <div class="label-with-hint">
+                                            <label for="tgBotToken">Bot Token (<code>@BotFather</code>)</label>
+                                            <button
+                                                type="button"
+                                                id="verifyTgTokenBtn"
+                                                class="btn btn-sm btn-secondary"
+                                                disabled
+                                                title="Verifica a validade do token na API do Telegram"
+                                            >
+                                                Verificar token
+                                            </button>
+                                        </div>
+                                        <input type="password" id="tgBotToken" class="linear-input" placeholder="123456789:AAH..." />
+                                        <div id="tgTokenVerifyFeedback" class="field-hint-inline hidden" style="margin-top: 4px;"></div>
+                                    </div>
+                                    <div class="field-group">
+                                        <label for="tgChatId">Chat ID ou @canal</label>
+                                        <input type="text" id="tgChatId" class="linear-input" placeholder="Ex.: -100192837465 ou @meucanal" />
+                                    </div>
+                                </div>
+
+                                <div class="checkbox-row">
+                                    <label class="check-label">
+                                        <input type="checkbox" id="destEnabled" checked />
+                                        <span>Destino ativo para recebimento de ofertas nos ciclos</span>
+                                    </label>
+                                </div>
+
+                                <div class="form-actions-row">
+                                    <button type="submit" id="destSubmitBtn" class="btn btn-accent">Adicionar Destino de Saída</button>
+                                    <button type="button" id="cancelDestEditBtn" class="btn btn-secondary hidden">Cancelar Edição</button>
+                                </div>
+                            </form>
+
+                            <hr class="divider" />
+
+                            <h4 class="subsection-title">Destinos Configurados</h4>
+                            <div id="destinationsListContainer" class="destinations-list"></div>
+                        </section>
+
+                        <!-- Coluna 2: Template de Mensagem Personalizável por Plataforma + Preview -->
+                        <section class="card panel-pad">
+                            <div class="card-header-clean">
+                                <div class="section-header-row" style="margin-bottom: 4px;">
+                                    <h3 class="section-title">Template de Mensagem por Plataforma</h3>
+                                    <span class="badge-id" id="templateCharCounter">0 / 1024 chars</span>
+                                </div>
+                                <p class="section-desc">
+                                    Personalize o formato de publicação de cada plataforma (HTML no Telegram vs Markdown no WhatsApp).
+                                </p>
+                            </div>
+
+                            <!-- Seletor de Plataforma do Template -->
+                            <div class="store-tabs-bar" id="templatePlatformTabs" style="margin-bottom: 12px;">
+                                <button type="button" class="store-tab active" data-tpl-platform="telegram">
+                                    <span>Telegram (HTML)</span>
+                                    <span class="badge-id">Máx 1024</span>
+                                </button>
+                                <button type="button" class="store-tab" data-tpl-platform="whatsapp">
+                                    <span>WhatsApp (Texto/Markdown)</span>
+                                    <span class="badge-id">Máx 4096</span>
+                                </button>
+                            </div>
+
+                            <form id="platformTemplateForm" class="stack-form">
+                                <input type="hidden" id="templatePlatformInput" value="telegram" />
+
+                                <div class="field-group">
+                                    <div class="label-with-hint">
+                                        <label for="platformTemplateInput">Variáveis Dinâmicas (clique para inserir)</label>
+                                        <span class="field-hint-inline">Obrigatórias: <code>{titulo}</code>, <code>{preco}</code>, <code>{link_afiliado}</code></span>
+                                    </div>
+                                    <div class="keyword-tags-preview" id="templateVariablesBar">
+                                        <button type="button" class="chip" data-insert-var="{titulo}">{titulo} *</button>
+                                        <button type="button" class="chip" data-insert-var="{preco}">{preco} *</button>
+                                        <button type="button" class="chip" data-insert-var="{preco_original}">{preco_original}</button>
+                                        <button type="button" class="chip" data-insert-var="{desconto}">{desconto}</button>
+                                        <button type="button" class="chip" data-insert-var="{link_afiliado}">{link_afiliado} *</button>
+                                        <button type="button" class="chip" data-insert-var="{avaliacao}">{avaliacao}</button>
+                                        <button type="button" class="chip" data-insert-var="{vendedor}">{vendedor}</button>
+                                        <button type="button" class="chip" data-insert-var="{ciclo}">{ciclo}</button>
+                                    </div>
+                                </div>
+
+                                <div class="field-group">
+                                    <label for="platformTemplateInput">Corpo do Template</label>
+                                    <textarea
+                                        id="platformTemplateInput"
+                                        rows="7"
+                                        class="linear-input linear-textarea mono-textarea"
+                                        placeholder="Digite o template da mensagem..."
+                                        required
+                                    ></textarea>
+                                </div>
+
+                                <div class="field-group">
+                                    <div class="label-with-hint">
+                                        <label>Pré-visualização do Resultado (Live Preview)</label>
+                                        <span class="field-hint-inline" id="templateValidationStatus">Template válido</span>
+                                    </div>
+                                    <div id="templateLivePreviewBox" class="template-preview-box"></div>
+                                </div>
+
+                                <div class="form-actions-row">
+                                    <button type="submit" id="saveTemplateBtn" class="btn btn-primary">Salvar Template da Plataforma</button>
+                                    <button type="button" id="resetTemplateBtn" class="btn btn-secondary">Restaurar Padrão</button>
+                                </div>
+                            </form>
+                        </section>
+                    </div>
+                </div>
+
+                <!-- ============================================================ -->
+                <!-- SEÇÃO 4: HISTÓRICO E MONITORAMENTO                           -->
+                <!-- ============================================================ -->
+                <div id="sec-history" class="app-section hidden">
+                    <div class="section-header-row card panel-pad">
+                        <div>
+                            <h3 class="section-title">Monitoramento de Execuções &amp; Histórico</h3>
+                            <p class="section-desc">Acompanhe funis, ofertas publicadas e logs de ciclo.</p>
+                        </div>
+                        <button type="button" id="refreshHistoryBtn" class="btn btn-secondary">Atualizar Histórico</button>
+                    </div>
+
+                    <section class="card panel-pad">
+                        <h4 class="subsection-title">Histórico de Execuções dos Ciclos</h4>
+                        <div class="table-container">
+                            <table class="products-table">
+                                <thead>
+                                    <tr>
+                                        <th>Previsto / Início</th>
+                                        <th>Ciclo / Nicho</th>
+                                        <th>Status</th>
+                                        <th>Duração / Atraso</th>
+                                        <th>Etapas (ms) &amp; Gargalo</th>
+                                        <th>Buscados</th>
+                                        <th>Filtrados</th>
+                                        <th>Links Afiliado</th>
+                                        <th>Inéditos</th>
+                                        <th>Enviados</th>
+                                        <th>Observação / Erro</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="runsHistoryBody"></tbody>
+                            </table>
+                        </div>
+                    </section>
+
+                    <section class="card panel-pad">
+                        <h4 class="subsection-title">Histórico de Ofertas Enviadas aos Destinos</h4>
+                        <div class="table-container">
+                            <table class="products-table">
+                                <thead>
+                                    <tr>
+                                        <th>Data/Hora</th>
+                                        <th>Ciclo</th>
+                                        <th>Destino</th>
+                                        <th>ID / Produto</th>
+                                        <th>Preço Promo</th>
+                                        <th>Desconto</th>
+                                        <th>Link Afiliado</th>
+                                        <th>Status</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="offersHistoryBody"></tbody>
+                            </table>
+                        </div>
+                    </section>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
