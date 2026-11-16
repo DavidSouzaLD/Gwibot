@@ -404,6 +404,12 @@ class CycleCreateRequest(BaseModel):
     destination_ids: list[str] = Field(default_factory=list, description="IDs dos destinos de publicação")
     filters: CycleFilters = Field(default_factory=CycleFilters, description="Filtros de preço, desconto e avaliação")
     deduplicate: bool = Field(default=True, description="Evita enviar ofertas repetidas entre execuções")
+    resend_after_hours: int = Field(
+        default=0,
+        ge=0,
+        le=8760,
+        description="Janela de reenvio em horas. 0 = nunca reenviar (deduplicação permanente). Se > 0, permite reenviar após decorridas X horas.",
+    )
 
     @model_validator(mode="after")
     def validate_keywords_and_intervals(self) -> "CycleCreateRequest":

@@ -664,3 +664,23 @@ async def retry_failed_queue_items_endpoint(
     rearmed = storage_service.retry_failed_queue_items(cycle_id=cycle_id)
     return {"status": "ok", "rearmed_count": rearmed}
 
+
+# =====================================================================
+# Reset Completo do Aplicativo (/api/system/reset)
+# =====================================================================
+
+@app.post("/api/system/reset", tags=["System"])
+async def reset_all_system_data_endpoint() -> dict[str, str]:
+    """Para todos os ciclos ativos e apaga todos os dados do sistema, deixando o app vazio e pronto para configuração."""
+    await cycle_scheduler.shutdown()
+    cycle_scheduler._running_locks.clear()
+    storage_service.reset_all_data()
+    scraper_service.clear_cache()
+    scraper_service.clear_cooldown()
+    session_manager.logout()
+    return {
+        "status": "ok",
+        "message": "Todos os dados, configurações, ciclos, destinos, histórico e sessão foram resetados com sucesso.",
+    }
+
+

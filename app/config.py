@@ -32,7 +32,7 @@ class Settings:
     # URLs do Mercado Livre Brasil
     ml_base_url: str = "https://www.mercadolivre.com.br"
     ml_search_base_url: str = "https://lista.mercadolivre.com.br"
-    ml_login_url: str = "https://www.mercadolivre.com.br/login/identification?challenge_id=a2f029bb-d51a-4b94-aae5-d24fb6198146&platform_id=ml&redirect_url=https%3A%2F%2Fwww.mercadolivre.com%2Fjms%2Fmlb%2Flgz%2Fmsl%2Flogin%2FH4sIAAAAAAAEA1VP22rDMAz9Fz-XpATalDzuN8Ywiq2kYr7NVuKO0n-f3NKHvUnnJp27cnGloPk3oZoU3pIjQ6wOKjngJWavyQrhnUCFGN_r3CSQwSNjLmq6t6AV7QeKqUUt4AqKCDa-6sXFKtjzlmBUNN7EF8DpivNO2Nh_jow_GxbRCEFhB0dWP--JfY0CXplTmfq-1tp5zAZsdLRn7Ez03Zx79ThIYmHNGcy3mjhvKN-kVhCYYng1OQ-X43EcxlGG02m4SLxF4yig1P78evwBFdWJpCEBAAA%2Fidentification_challenge%2Fcallback%3Fdps%3D%26rbms%3D#nav-header"
+    ml_login_url: str = "https://www.mercadolivre.com.br"
     ml_protected_verify_url: str = "https://myaccount.mercadolivre.com.br/summary"
     ml_affiliate_stripe_api_url: str = (
         "https://www.mercadolivre.com.br/affiliate-program/api/v2/affiliates/createLink"

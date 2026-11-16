@@ -41,6 +41,8 @@ class StorageService:
         self._lock = threading.RLock()
         self._sent_keys_cache: set[str] = set()
         self._sent_dest_cache: set[tuple[str, str]] = set()
+        self._sent_dest_timestamp_cache: dict[tuple[str, str], float] = {}
+        self._sent_keys_timestamp_cache: dict[str, float] = {}
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
@@ -97,6 +99,7 @@ class StorageService:
                     destination_ids_json TEXT NOT NULL DEFAULT '[]',
                     filters_json TEXT NOT NULL DEFAULT '{}',
                     deduplicate INTEGER NOT NULL DEFAULT 1,
+                    resend_after_hours INTEGER NOT NULL DEFAULT 0,
                     state TEXT NOT NULL DEFAULT 'idle',
                     last_run_at TEXT,
                     next_run_at TEXT,
@@ -223,6 +226,10 @@ class StorageService:
                 conn.execute(
                     "ALTER TABLE cycles ADD COLUMN last_page_offset INTEGER NOT NULL DEFAULT 1"
                 )
+            if "resend_after_hours" not in cols:
+                conn.execute(
+                    "ALTER TABLE cycles ADD COLUMN resend_after_hours INTEGER NOT NULL DEFAULT 0"
+                )
             if "last_duration_seconds" not in cols:
                 conn.execute("ALTER TABLE cycles ADD COLUMN last_duration_seconds REAL")
             if "last_schedule_delay_seconds" not in cols:
@@ -267,9 +274,9 @@ class StorageService:
                     "ALTER TABLE output_destinations ADD COLUMN custom_template TEXT"
                 )
 
-            # Pré-aquece o cache em memória de chaves de produtos já enviados com sucesso (global e por destino)
+            # Pré-aquece o cache em memória de chaves de produtos já enviados com sucesso (global e por destino) com timestamps
             sent_rows = conn.execute(
-                "SELECT dedup_key, destination_id FROM sent_offers WHERE status = 'sent'"
+                "SELECT dedup_key, destination_id, sent_at FROM sent_offers WHERE status = 'sent'"
             ).fetchall()
             self._sent_keys_cache = {r["dedup_key"] for r in sent_rows if r["dedup_key"]}
             self._sent_dest_cache = {
@@ -277,6 +284,22 @@ class StorageService:
                 for r in sent_rows
                 if r["dedup_key"] and r["destination_id"]
             }
+            self._sent_dest_timestamp_cache = {}
+            self._sent_keys_timestamp_cache = {}
+            for r in sent_rows:
+                dk = r["dedup_key"]
+                did = r["destination_id"]
+                s_at = r["sent_at"]
+                if not dk:
+                    continue
+                try:
+                    ts = datetime.fromisoformat(s_at).timestamp()
+                except Exception:
+                    ts = 0.0
+                if ts > self._sent_keys_timestamp_cache.get(dk, 0.0):
+                    self._sent_keys_timestamp_cache[dk] = ts
+                if did and ts > self._sent_dest_timestamp_cache.get((dk, did), 0.0):
+                    self._sent_dest_timestamp_cache[(dk, did)] = ts
 
             # Recupera filas interrompidas ('processing' -> 'pending') após reinicialização do servidor
             conn.execute(
@@ -567,8 +590,8 @@ class StorageService:
                 INSERT INTO cycles (
                     id, name, query, source_id, search_limit, max_offers_per_run,
                     interval_minutes, product_delay_minutes, last_page_offset, destination_ids_json, filters_json,
-                    deduplicate, state, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, 'idle', ?, ?)
+                    deduplicate, resend_after_hours, state, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, 'idle', ?, ?)
                 """,
                 (
                     cycle_id,
@@ -582,6 +605,7 @@ class StorageService:
                     json.dumps(unique_dest_ids),
                     req.filters.model_dump_json(),
                     1 if req.deduplicate else 0,
+                    int(req.resend_after_hours or 0),
                     now,
                     now,
                 ),
@@ -606,6 +630,7 @@ class StorageService:
                     destination_ids_json = ?,
                     filters_json = ?,
                     deduplicate = ?,
+                    resend_after_hours = ?,
                     updated_at = ?
                 WHERE id = ?
                 """,
@@ -620,6 +645,7 @@ class StorageService:
                     json.dumps(unique_dest_ids),
                     req.filters.model_dump_json(),
                     1 if req.deduplicate else 0,
+                    int(req.resend_after_hours or 0),
                     now,
                     cycle_id,
                 ),
@@ -734,6 +760,7 @@ class StorageService:
             destination_ids=json.loads(row["destination_ids_json"] or "[]"),
             filters=CycleFilters(**json.loads(row["filters_json"] or "{}")),
             deduplicate=bool(row["deduplicate"]),
+            resend_after_hours=int(row["resend_after_hours"]) if "resend_after_hours" in row_keys and row["resend_after_hours"] is not None else 0,
             state=row["state"],
             last_run_at=row["last_run_at"],
             next_run_at=row["next_run_at"],
@@ -770,32 +797,71 @@ class StorageService:
         digest = hashlib.sha1(identifier.encode("utf-8")).hexdigest()[:12].upper()
         return f"MLBU_{digest}", dedup_key
 
-    def is_offer_already_sent(self, dedup_key: str, destination_id: Optional[str] = None) -> bool:
-        """Verifica em O(1) via cache em memória sincronizado se `dedup_key` já foi enviado (globalmente ou a um destino)."""
+    def is_offer_already_sent(
+        self,
+        dedup_key: str,
+        destination_id: Optional[str] = None,
+        resend_after_hours: int = 0,
+    ) -> bool:
+        """Verifica em O(1) se `dedup_key` já foi enviado (globalmente ou a um destino),
+        respeitando a janela de reenvio em horas caso resend_after_hours > 0.
+        """
         if not dedup_key:
             return False
         with self._lock:
+            now_ts = datetime.now().astimezone().timestamp()
+            cutoff_ts = now_ts - (resend_after_hours * 3600.0) if resend_after_hours > 0 else None
+
             if destination_id:
-                return (dedup_key, destination_id) in self._sent_dest_cache
-            return dedup_key in self._sent_keys_cache
+                if (dedup_key, destination_id) not in self._sent_dest_cache:
+                    return False
+                if cutoff_ts is None:
+                    return True
+                last_ts = self._sent_dest_timestamp_cache.get((dedup_key, destination_id), 0.0)
+                return last_ts >= cutoff_ts
+
+            if dedup_key not in self._sent_keys_cache:
+                return False
+            if cutoff_ts is None:
+                return True
+            last_ts = self._sent_keys_timestamp_cache.get(dedup_key, 0.0)
+            return last_ts >= cutoff_ts
 
     def filter_unsent_dedup_keys(
         self,
         dedup_keys: list[str],
         destination_ids: Optional[list[str]] = None,
+        resend_after_hours: int = 0,
     ) -> set[str]:
-        """Retorna o subconjunto de chaves que AINDA NÃO foram enviadas com sucesso."""
+        """Retorna o subconjunto de chaves que AINDA NÃO foram enviadas com sucesso (ou expiradas pela janela de reenvio)."""
         if not dedup_keys:
             return set()
         with self._lock:
+            now_ts = datetime.now().astimezone().timestamp()
+            cutoff_ts = now_ts - (resend_after_hours * 3600.0) if resend_after_hours > 0 else None
+
+            def is_sent_for_dest(k: str, d_id: str) -> bool:
+                if (k, d_id) not in self._sent_dest_cache:
+                    return False
+                if cutoff_ts is None:
+                    return True
+                return self._sent_dest_timestamp_cache.get((k, d_id), 0.0) >= cutoff_ts
+
+            def is_sent_globally(k: str) -> bool:
+                if k not in self._sent_keys_cache:
+                    return False
+                if cutoff_ts is None:
+                    return True
+                return self._sent_keys_timestamp_cache.get(k, 0.0) >= cutoff_ts
+
             if destination_ids:
-                # Produto é elegível se ainda não foi enviado para PELO MENOS UM dos destinos ativos
+                # Produto é elegível se ainda não foi enviado (ou expirou) para PELO MENOS UM dos destinos ativos
                 return {
                     k
                     for k in dedup_keys
-                    if k and any((k, d_id) not in self._sent_dest_cache for d_id in destination_ids)
+                    if k and any(not is_sent_for_dest(k, d_id) for d_id in destination_ids)
                 }
-            return {k for k in dedup_keys if k and k not in self._sent_keys_cache}
+            return {k for k in dedup_keys if k and not is_sent_globally(k)}
 
     def record_sent_offer(self, record: SentOfferRecord) -> None:
         self.record_sent_offers_batch([record])
@@ -842,8 +908,16 @@ class StorageService:
             for r in records:
                 if r.status == "sent" and r.dedup_key:
                     self._sent_keys_cache.add(r.dedup_key)
+                    try:
+                        ts = datetime.fromisoformat(r.sent_at).timestamp()
+                    except Exception:
+                        ts = datetime.now().astimezone().timestamp()
+                    if ts > self._sent_keys_timestamp_cache.get(r.dedup_key, 0.0):
+                        self._sent_keys_timestamp_cache[r.dedup_key] = ts
                     if r.destination_id:
                         self._sent_dest_cache.add((r.dedup_key, r.destination_id))
+                        if ts > self._sent_dest_timestamp_cache.get((r.dedup_key, r.destination_id), 0.0):
+                            self._sent_dest_timestamp_cache[(r.dedup_key, r.destination_id)] = ts
 
     # -----------------------------------------------------------------
     # Banco de Produtos (products_catalog) & Fila Persistente (offer_queue)
@@ -1044,10 +1118,11 @@ class StorageService:
         source_id: str,
         candidates: list[tuple[str, ProductItem]],
         destinations: list[OutputDestinationConfig],
+        resend_after_hours: int = 0,
     ) -> int:
         """Enfileira produtos aprovados e inéditos na fila persistente (`offer_queue`).
 
-        Garante que uma oferta nunca seja enfileirada ou enviada duas vezes para o mesmo destino.
+        Garante que uma oferta não seja reenviada antes da janela configurada em `resend_after_hours`.
         Retorna a quantidade de produtos distintos adicionados/atualizados na fila.
         """
         if not candidates:
@@ -1074,8 +1149,10 @@ class StorageService:
                 any_dest_queued = False
                 for dest in target_dests:
                     dest_id = dest.id or "__unassigned__"
-                    # Nunca enfileira se já foi publicado neste destino
-                    if dest_id != "__unassigned__" and (dedup_key, dest_id) in self._sent_dest_cache:
+                    # Não enfileira se já foi publicado neste destino (a menos que a janela de reenvio permita)
+                    if dest_id != "__unassigned__" and self.is_offer_already_sent(
+                        dedup_key, dest_id, resend_after_hours=resend_after_hours
+                    ):
                         continue
 
                     existing_q = conn.execute(
@@ -1085,7 +1162,37 @@ class StorageService:
 
                     if existing_q:
                         if existing_q["status"] == "sent":
+                            if self.is_offer_already_sent(
+                                dedup_key, dest_id, resend_after_hours=resend_after_hours
+                            ):
+                                continue
+                            # Janela de reenvio expirada: reabre a oferta na fila para novo disparo
+                            conn.execute(
+                                """
+                                UPDATE offer_queue SET
+                                    cycle_id = ?,
+                                    cycle_name = ?,
+                                    product_snapshot_json = ?,
+                                    affiliate_url = COALESCE(?, affiliate_url),
+                                    status = 'pending',
+                                    attempts = 0,
+                                    sent_at = NULL,
+                                    last_error = NULL,
+                                    updated_at = ?
+                                WHERE id = ?
+                                """,
+                                (
+                                    cycle_id,
+                                    cycle_name,
+                                    item.model_dump_json(),
+                                    item.affiliate_url,
+                                    now,
+                                    existing_q["id"],
+                                ),
+                            )
+                            any_dest_queued = True
                             continue
+
                         conn.execute(
                             """
                             UPDATE offer_queue SET
@@ -1196,9 +1303,9 @@ class StorageService:
                     continue
                 if cycle.deduplicate:
                     if active_dest_ids:
-                        if all((dk, d_id) in self._sent_dest_cache for d_id in active_dest_ids):
+                        if all(self.is_offer_already_sent(dk, d_id, resend_after_hours=cycle.resend_after_hours) for d_id in active_dest_ids):
                             continue
-                    elif dk in self._sent_keys_cache:
+                    elif self.is_offer_already_sent(dk, resend_after_hours=cycle.resend_after_hours):
                         continue
 
                 try:
@@ -1231,9 +1338,9 @@ class StorageService:
                     continue
                 if cycle.deduplicate:
                     if active_dest_ids:
-                        if all((dk, d_id) in self._sent_dest_cache for d_id in active_dest_ids):
+                        if all(self.is_offer_already_sent(dk, d_id, resend_after_hours=cycle.resend_after_hours) for d_id in active_dest_ids):
                             continue
-                    elif dk in self._sent_keys_cache:
+                    elif self.is_offer_already_sent(dk, resend_after_hours=cycle.resend_after_hours):
                         continue
 
                 # Verifica se o produto pertence a algum termo do ciclo
@@ -1622,7 +1729,28 @@ class StorageService:
             conn.execute("DELETE FROM cycle_runs")
             self._sent_keys_cache.clear()
             self._sent_dest_cache.clear()
+            self._sent_dest_timestamp_cache.clear()
+            self._sent_keys_timestamp_cache.clear()
         logger.info("Histórico de ofertas enviadas, fila, banco de produtos e execuções limpo.")
+
+    def reset_all_data(self) -> None:
+        """Apaga todos os dados do aplicativo (ciclos, destinos, afiliados, templates, catálogo, fila e histórico) deixando-o vazio para nova configuração."""
+        with self._lock, self._connect() as conn:
+            conn.execute("DELETE FROM sent_offers")
+            conn.execute("DELETE FROM offer_queue")
+            conn.execute("DELETE FROM products_catalog")
+            conn.execute("DELETE FROM cycle_runs")
+            conn.execute("DELETE FROM cycles")
+            conn.execute("DELETE FROM output_destinations")
+            conn.execute("DELETE FROM affiliate_configs")
+            conn.execute("DELETE FROM platform_templates")
+            self._sent_keys_cache.clear()
+            self._sent_dest_cache.clear()
+            self._sent_dest_timestamp_cache.clear()
+            self._sent_keys_timestamp_cache.clear()
+        logger.info(
+            "Reset completo do sistema executado: ciclos, destinos, fontes de afiliado, templates, catálogo, fila e histórico zerados."
+        )
 
 
 storage_service = StorageService()

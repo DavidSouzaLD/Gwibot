@@ -1642,6 +1642,76 @@ def test_persistent_profile_2fa_product_catalog_queue_retry_and_captcha_cooldown
         scraper_service.clear_cooldown()
 
 
+def test_sidebar_reset_button_confirmation_modal_and_full_system_reset() -> None:
+    """Valida o botão de reset no menu lateral abaixo do Autenticar, o pop-up de confirmação e o endpoint /api/system/reset."""
+    # 1. Verifica que o botão #resetAppBtn está posicionado abaixo de #loginBtn e que o modal #resetConfirmModal existe na UI
+    html = client.get("/").text
+    assert 'id="resetAppBtn"' in html
+    assert 'id="resetConfirmModal"' in html
+    assert 'id="confirmResetModalBtn"' in html
+    assert 'id="cancelResetModalBtn"' in html
+    assert html.index('id="loginBtn"') < html.index('id="resetAppBtn"')
+
+    # 2. Popula dados (afiliado, destino, ciclo) e executa o reset completo
+    client.put(
+        "/api/affiliates/config",
+        json={
+            "enabled": True,
+            "matt_word": "tag_antes_reset",
+            "matt_tool": "99887766",
+            "require_valid_affiliate": True,
+        },
+    )
+    dest_res = client.post(
+        "/api/outputs",
+        json={
+            "name": "Destino Antes do Reset",
+            "output_type": "telegram",
+            "enabled": True,
+            "config": {"bot_token": "555555:TOKEN_RESET", "chat_id": "-100555555"},
+        },
+    )
+    assert dest_res.status_code == 200
+    dest_id = dest_res.json()["id"]
+
+    cycle_res = client.post(
+        "/api/cycles",
+        json={
+            "name": "Ciclo Antes do Reset",
+            "query": "monitor",
+            "source_id": "mercadolivre",
+            "search_limit": 5,
+            "max_offers_per_run": 1,
+            "interval_minutes": 10,
+            "destination_ids": [dest_id],
+        },
+    )
+    assert cycle_res.status_code == 200
+
+    assert len(client.get("/api/outputs").json()) >= 1
+    assert len(client.get("/api/cycles").json()) >= 1
+
+    # 3. Dispara o reset completo (/api/system/reset)
+    reset_res = client.post("/api/system/reset")
+    assert reset_res.status_code == 200
+    assert reset_res.json()["status"] == "ok"
+
+    # 4. Verifica que o app ficou completamente vazio e pronto para nova configuração
+    assert client.get("/api/outputs").json() == []
+    assert client.get("/api/cycles").json() == []
+    assert client.get("/api/products").json() == []
+    assert client.get("/api/queue").json() == []
+    assert client.get("/api/history/runs").json() == []
+    assert client.get("/api/history/offers").json() == []
+    aff_after = client.get("/api/affiliates/config").json()
+    assert aff_after["matt_word"] == ""
+    assert aff_after["matt_tool"] == ""
+    auth_after = client.get("/api/auth/status").json()
+    assert auth_after["authenticated"] is False
+    assert auth_after["state"] == "logged_out"
+
+
+
 
 
 

@@ -375,6 +375,7 @@ class CycleScheduler:
                         unsent_keys = storage_service.filter_unsent_dedup_keys(
                             [dk for dk, _ in eligible_with_keys],
                             destination_ids=active_dest_ids if active_dest_ids else None,
+                            resend_after_hours=cycle.resend_after_hours,
                         )
                         for dk, item in eligible_with_keys:
                             if dk in unsent_keys:
@@ -420,6 +421,7 @@ class CycleScheduler:
                         source_id=cycle.source_id,
                         candidates=candidates_to_send,
                         destinations=destinations,
+                        resend_after_hours=cycle.resend_after_hours,
                     )
 
                 run_log.searched_count = total_searched
@@ -486,14 +488,18 @@ class CycleScheduler:
                 for idx, (dedup_key, item) in enumerate(selected_offers):
                     prod_id, _ = storage_service.canonical_product_identity(cycle.source_id, item)
                     if destinations:
-                        # Filtra destinos para os quais este produto AINDA NÃO foi enviado
+                        # Filtra destinos para os quais este produto AINDA NÃO foi enviado (respeitando janela de reenvio)
                         target_dests_for_item = [
                             dest
                             for dest in destinations
                             if not (
                                 cycle.deduplicate
                                 and dest.id
-                                and storage_service.is_offer_already_sent(dedup_key, dest.id)
+                                and storage_service.is_offer_already_sent(
+                                    dedup_key,
+                                    dest.id,
+                                    resend_after_hours=cycle.resend_after_hours,
+                                )
                             )
                         ]
                         if not target_dests_for_item:

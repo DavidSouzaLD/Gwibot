@@ -1212,6 +1212,8 @@
         if (cycleFormTitle) cycleFormTitle.textContent = "Novo Ciclo de Campanha";
         if (cycleSubmitBtn) cycleSubmitBtn.textContent = "Salvar Ciclo Automatizado";
         if (cancelCycleEditBtn) cancelCycleEditBtn.classList.add("hidden");
+        const resendInput = document.getElementById("cycleResendAfterHours");
+        if (resendInput) resendInput.value = "0";
         renderKeywordTags();
         cyclesListContainer.querySelectorAll(".item-card.editing").forEach((el) => el.classList.remove("editing"));
     }
@@ -1231,6 +1233,8 @@
         document.getElementById("cycleInterval").value = cycle.interval_minutes ?? 30;
         document.getElementById("cycleProductDelay").value = Math.round((cycle.product_delay_minutes ?? 0) * 60 * 10) / 10;
         document.getElementById("cycleDeduplicate").checked = Boolean(cycle.deduplicate);
+        const resendInput = document.getElementById("cycleResendAfterHours");
+        if (resendInput) resendInput.value = cycle.resend_after_hours ?? 0;
 
         const f = cycle.filters || {};
         document.getElementById("filterMinPrice").value = f.min_price !== null && f.min_price !== undefined ? f.min_price : "";
@@ -1344,6 +1348,7 @@
             product_delay_minutes: productDelayMinutes,
             destination_ids: selectedDests,
             deduplicate: document.getElementById("cycleDeduplicate").checked,
+            resend_after_hours: parseOptInt("cycleResendAfterHours") || 0,
             filters: {
                 min_price: parseOptFloat("filterMinPrice"),
                 max_price: parseOptFloat("filterMaxPrice"),
@@ -1436,7 +1441,8 @@
                     </div>
                     <div style="font-size: 11px; color: var(--text-muted);">
                         Busca: <b>${c.search_limit}</b> &bull; Máx: <b>${c.max_offers_per_run}</b> &bull;
-                        Ciclo: <b>${c.interval_minutes} min</b> &bull; Entre prod.: <b>${delayLabel}</b> &bull; ${escapeHtml(filterDesc)}
+                        Ciclo: <b>${c.interval_minutes} min</b> &bull; Entre prod.: <b>${delayLabel}</b> &bull;
+                        Reenvio: <b>${c.resend_after_hours && c.resend_after_hours > 0 ? c.resend_after_hours + "h" : "Nunca"}</b> &bull; ${escapeHtml(filterDesc)}
                     </div>
                     <div style="font-size: 11px; color: var(--text-muted);">
                         Execuções: <b>${c.total_runs}</b> &bull; Enviadas: <b>${c.total_offers_sent}</b> &bull;
@@ -1584,6 +1590,100 @@
     }
 
     refreshHistoryBtn.addEventListener("click", loadHistory);
+
+    // =====================================================================
+    // Full System Reset Modal & Action
+    // =====================================================================
+    const resetAppBtn = document.getElementById("resetAppBtn");
+    const resetConfirmModal = document.getElementById("resetConfirmModal");
+    const cancelResetModalBtn = document.getElementById("cancelResetModalBtn");
+    const confirmResetModalBtn = document.getElementById("confirmResetModalBtn");
+
+    function openResetModal() {
+        if (!resetConfirmModal) return;
+        resetConfirmModal.classList.remove("hidden");
+    }
+
+    function closeResetModal() {
+        if (!resetConfirmModal) return;
+        resetConfirmModal.classList.add("hidden");
+    }
+
+    if (resetAppBtn) {
+        resetAppBtn.addEventListener("click", openResetModal);
+    }
+    if (cancelResetModalBtn) {
+        cancelResetModalBtn.addEventListener("click", closeResetModal);
+    }
+    if (resetConfirmModal) {
+        resetConfirmModal.addEventListener("click", (e) => {
+            if (e.target === resetConfirmModal) {
+                closeResetModal();
+            }
+        });
+    }
+    document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && resetConfirmModal && !resetConfirmModal.classList.contains("hidden")) {
+            closeResetModal();
+        }
+    });
+
+    if (confirmResetModalBtn) {
+        confirmResetModalBtn.addEventListener("click", async () => {
+            const originalLabel = confirmResetModalBtn.textContent;
+            confirmResetModalBtn.disabled = true;
+            if (cancelResetModalBtn) cancelResetModalBtn.disabled = true;
+            confirmResetModalBtn.textContent = "Resetando...";
+
+            try {
+                const res = await fetch("/api/system/reset", { method: "POST" });
+                const data = await res.json();
+                if (!res.ok) {
+                    throw new Error(data.detail || "Falha ao resetar os dados do aplicativo.");
+                }
+
+                // Limpa mapas e estados locais da interface
+                loadedProvidersMap.clear();
+                loadedDestinationsMap.clear();
+                loadedCyclesMap.clear();
+                currentPayload = null;
+
+                if (resultsWrapper) resultsWrapper.classList.add("hidden");
+                if (gridView) gridView.innerHTML = "";
+                if (tableBody) tableBody.innerHTML = "";
+                if (jsonPre) jsonPre.textContent = "";
+                if (affTestResultBox) affTestResultBox.classList.add("hidden");
+                if (tgTokenVerifyFeedback) tgTokenVerifyFeedback.classList.add("hidden");
+
+                resetCycleFormState();
+                resetDestinationFormState();
+
+                await Promise.all([
+                    checkHealth(),
+                    fetchAuthStatus(),
+                    loadAffiliateConfig(),
+                    loadDestinationsAndCycles(),
+                    loadPlatformTemplate(templatePlatformInput ? templatePlatformInput.value : "telegram"),
+                    loadHistory(),
+                ]);
+
+                closeResetModal();
+                showAuthFeedback(
+                    "Sistema Resetado:",
+                    data.message || "Todos os dados foram apagados. O aplicativo está vazio e pronto para nova configuração.",
+                    "info",
+                    7000
+                );
+            } catch (err) {
+                closeResetModal();
+                showAlert("Erro ao Resetar", err.message || "Não foi possível concluir o reset.", "error");
+            } finally {
+                confirmResetModalBtn.disabled = false;
+                if (cancelResetModalBtn) cancelResetModalBtn.disabled = false;
+                confirmResetModalBtn.textContent = originalLabel;
+            }
+        });
+    }
 
     checkHealth();
     fetchAuthStatus();

@@ -488,6 +488,14 @@ class SessionManager:
                 ) as (context, page):
                     page.set_default_navigation_timeout(settings.navigation_timeout_ms)
                     page.goto(settings.ml_login_url, wait_until="domcontentloaded")
+                    # Se não estiver logado, clica no botão oficial "Entre" para redirecionar com tokens frescos
+                    try:
+                        if not self._is_user_logged_in_on_page(page, context):
+                            entre_btn = page.locator('header a:has-text("Entre"), nav a:has-text("Entre"), a[data-link-id="login"]').first
+                            if entre_btn.is_visible(timeout=3000):
+                                entre_btn.click()
+                    except Exception as exc:
+                        logger.debug("Tentativa de clique automático no botão 'Entre': %s", exc)
                     logger.info("Janela de login aberta no perfil persistente. Aguardando conclusão manual + 2FA...")
 
                     login_detected = False
