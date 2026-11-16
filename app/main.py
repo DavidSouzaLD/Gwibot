@@ -78,6 +78,17 @@ STATIC_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
+@app.middleware("http")
+async def disable_static_cache_middleware(request: Request, call_next: Any) -> Any:
+    """Evita cache obsoleto de HTML/CSS/JS no navegador após atualizações da interface."""
+    response = await call_next(request)
+    if request.url.path == "/" or request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
     """Padroniza erros de validação de parâmetros da API (HTTP 422)."""
