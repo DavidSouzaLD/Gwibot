@@ -680,23 +680,22 @@ class MercadoLivreScraper:
 
         except Exception as exc:
             logger.error("Erro no navegador durante coleta em lote: %s", exc, exc_info=True)
-            if not responses:
-                for kw, kw_limit in zip(keywords, limits):
-                    responses.append(
-                        SearchResponse(
-                            status="partial",
-                            metadata=SearchMetadata(
-                                query=kw,
-                                requested_limit=kw_limit,
-                                total_returned=0,
-                                pages_visited=0,
-                                elapsed_seconds=0.0,
-                                warning=f"Erro no navegador durante a coleta: {exc}",
-                                authenticated_session_used=authenticated_session_used,
-                            ),
-                            results=[],
-                        )
+            for kw, kw_limit in zip(keywords[len(responses):], limits[len(responses):]):
+                responses.append(
+                    SearchResponse(
+                        status="partial",
+                        metadata=SearchMetadata(
+                            query=kw,
+                            requested_limit=kw_limit,
+                            total_returned=0,
+                            pages_visited=0,
+                            elapsed_seconds=0.0,
+                            warning=f"Erro no navegador durante a coleta: {exc}",
+                            authenticated_session_used=authenticated_session_used,
+                        ),
+                        results=[],
                     )
+                )
 
         return responses
 

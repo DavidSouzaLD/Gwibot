@@ -31,6 +31,7 @@ from app.models import (
     OutputDestinationConfig,
     PLATFORM_MAX_CHARS,
     PlatformTemplateModel,
+    ProductAuditRecord,
     ProductItem,
     QueuedOfferRecord,
     SearchResponse,
@@ -674,6 +675,30 @@ async def retry_failed_queue_items_endpoint(
     """Reagenda imediatamente itens com falha/aguardando retentativa na fila persistente."""
     rearmed = storage_service.retry_failed_queue_items(cycle_id=cycle_id)
     return {"status": "ok", "rearmed_count": rearmed}
+
+
+@app.get("/api/observability/metrics", tags=["Observability"])
+async def get_observability_metrics_endpoint(
+    cycle_id: Optional[str] = Query(default=None),
+) -> dict[str, int]:
+    """Retorna métricas agregadas do pipeline: encontrados, elegíveis, descartados, pendentes, enviados e falhos."""
+    return storage_service.get_pipeline_metrics(cycle_id=cycle_id)
+
+
+@app.get("/api/observability/products", response_model=list[ProductAuditRecord], tags=["Observability"])
+async def list_product_audits_endpoint(
+    limit: int = Query(default=100, ge=1, le=500),
+    cycle_id: Optional[str] = Query(default=None),
+    run_id: Optional[str] = Query(default=None),
+    product_id: Optional[str] = Query(default=None),
+) -> list[ProductAuditRecord]:
+    """Lista logs individuais de auditoria por produto em cada etapa do pipeline."""
+    return storage_service.list_product_audits(
+        limit=limit,
+        cycle_id=cycle_id,
+        run_id=run_id,
+        product_id=product_id,
+    )
 
 
 # =====================================================================

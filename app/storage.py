@@ -23,6 +23,7 @@ from app.models import (
     DEFAULT_PLATFORM_TEMPLATES,
     OutputDestinationConfig,
     PlatformTemplateModel,
+    ProductAuditRecord,
     ProductItem,
     QueuedOfferRecord,
     SentOfferRecord,
@@ -202,6 +203,8 @@ class StorageService:
                     max_attempts INTEGER NOT NULL DEFAULT 3,
                     next_retry_at TEXT,
                     last_error TEXT,
+                    error_type TEXT,
+                    api_status_code INTEGER,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     sent_at TEXT,
@@ -210,6 +213,34 @@ class StorageService:
 
                 CREATE INDEX IF NOT EXISTS idx_offer_queue_status ON offer_queue(status, cycle_id, created_at ASC);
                 CREATE INDEX IF NOT EXISTS idx_offer_queue_dedup_dest ON offer_queue(dedup_key, destination_id);
+
+                CREATE TABLE IF NOT EXISTS product_audit_logs (
+                    id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    cycle_id TEXT NOT NULL,
+                    cycle_name TEXT NOT NULL,
+                    product_id TEXT NOT NULL,
+                    dedup_key TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    destination_id TEXT,
+                    destination_name TEXT,
+                    filter_passed INTEGER NOT NULL DEFAULT 1,
+                    filter_reason TEXT,
+                    queue_status TEXT,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    api_status_code INTEGER,
+                    api_response TEXT,
+                    error_type TEXT,
+                    error_message TEXT,
+                    filter_ms REAL NOT NULL DEFAULT 0.0,
+                    affiliate_ms REAL NOT NULL DEFAULT 0.0,
+                    dispatch_ms REAL NOT NULL DEFAULT 0.0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_product_audit_cycle_run ON product_audit_logs(cycle_id, run_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_product_audit_product ON product_audit_logs(product_id, created_at DESC);
                 """
             )
             # Migrações leves para bancos existentes
@@ -251,10 +282,21 @@ class StorageService:
                 "affiliate_ms": "REAL NOT NULL DEFAULT 0.0",
                 "dispatch_ms": "REAL NOT NULL DEFAULT 0.0",
                 "bottleneck_stage": "TEXT",
+                "discarded_count": "INTEGER NOT NULL DEFAULT 0",
+                "pending_count": "INTEGER NOT NULL DEFAULT 0",
             }
             for col_name, col_type in new_run_cols.items():
                 if col_name not in run_cols:
                     conn.execute(f"ALTER TABLE cycle_runs ADD COLUMN {col_name} {col_type}")
+
+            q_cols = {
+                r["name"]
+                for r in conn.execute("PRAGMA table_info(offer_queue)").fetchall()
+            }
+            if "error_type" not in q_cols:
+                conn.execute("ALTER TABLE offer_queue ADD COLUMN error_type TEXT")
+            if "api_status_code" not in q_cols:
+                conn.execute("ALTER TABLE offer_queue ADD COLUMN api_status_code INTEGER")
 
             aff_cols = {
                 r["name"]
@@ -1119,6 +1161,7 @@ class StorageService:
         candidates: list[tuple[str, ProductItem]],
         destinations: list[OutputDestinationConfig],
         resend_after_hours: int = 0,
+        deduplicate: bool = True,
     ) -> int:
         """Enfileira produtos aprovados e inéditos na fila persistente (`offer_queue`).
 
@@ -1149,24 +1192,29 @@ class StorageService:
                 any_dest_queued = False
                 for dest in target_dests:
                     dest_id = dest.id or "__unassigned__"
-                    # Não enfileira se já foi publicado neste destino (a menos que a janela de reenvio permita)
-                    if dest_id != "__unassigned__" and self.is_offer_already_sent(
-                        dedup_key, dest_id, resend_after_hours=resend_after_hours
+                    # Não enfileira se já foi publicado neste destino (a menos que deduplicate=False ou janela expirada)
+                    if (
+                        deduplicate
+                        and dest_id != "__unassigned__"
+                        and self.is_offer_already_sent(
+                            dedup_key, dest_id, resend_after_hours=resend_after_hours
+                        )
                     ):
                         continue
 
                     existing_q = conn.execute(
-                        "SELECT id, status FROM offer_queue WHERE dedup_key = ? AND destination_id = ?",
+                        "SELECT id, status, error_type FROM offer_queue WHERE dedup_key = ? AND destination_id = ?",
                         (dedup_key, dest_id),
                     ).fetchone()
 
                     if existing_q:
-                        if existing_q["status"] == "sent":
-                            if self.is_offer_already_sent(
+                        q_status = existing_q["status"]
+                        if q_status == "sent":
+                            if deduplicate and self.is_offer_already_sent(
                                 dedup_key, dest_id, resend_after_hours=resend_after_hours
                             ):
                                 continue
-                            # Janela de reenvio expirada: reabre a oferta na fila para novo disparo
+                            # Janela de reenvio expirada ou deduplicate=False: reabre a oferta na fila
                             conn.execute(
                                 """
                                 UPDATE offer_queue SET
@@ -1177,7 +1225,10 @@ class StorageService:
                                     status = 'pending',
                                     attempts = 0,
                                     sent_at = NULL,
+                                    next_retry_at = NULL,
                                     last_error = NULL,
+                                    error_type = NULL,
+                                    api_status_code = NULL,
                                     updated_at = ?
                                 WHERE id = ?
                                 """,
@@ -1191,6 +1242,10 @@ class StorageService:
                                 ),
                             )
                             any_dest_queued = True
+                            continue
+
+                        if q_status == "failed":
+                            # Oferta que já falhou definitivamente não deve ser re-enfileirada silenciosamente
                             continue
 
                         conn.execute(
@@ -1285,11 +1340,11 @@ class StorageService:
                 (now, now),
             )
 
-            # 2. Busca itens pendentes diretamente vinculados ao ciclo (ou compatíveis com seus destinos)
+            # 2. Busca itens pendentes diretamente vinculados ao ciclo (somente prontos para envio: 'pending')
             q_rows = conn.execute(
                 """
                 SELECT * FROM offer_queue
-                WHERE status IN ('pending', 'retry_wait')
+                WHERE status = 'pending'
                   AND attempts < max_attempts
                   AND cycle_id = ?
                 ORDER BY created_at ASC
@@ -1320,12 +1375,26 @@ class StorageService:
                 results.append((dk, item))
 
             # 3. Também verifica produtos não publicados no `products_catalog` que correspondam aos termos do ciclo
+            # Exclui itens já filtrados ('filtered_out') e itens que estão na fila como 'failed' ou 'retry_wait' futuro
+            blocked_q_rows = conn.execute(
+                """
+                SELECT dedup_key, destination_id, status, next_retry_at
+                FROM offer_queue
+                WHERE status IN ('failed', 'retry_wait')
+                """,
+            ).fetchall()
+            blocked_dk_dest: set[tuple[str, str]] = set()
+            for bq in blocked_q_rows:
+                if bq["status"] == "failed" or (bq["next_retry_at"] and bq["next_retry_at"] > now):
+                    blocked_dk_dest.add((bq["dedup_key"], bq["destination_id"]))
+
             cat_rows = conn.execute(
                 """
                 SELECT * FROM products_catalog
                 WHERE source_id = ?
                   AND available = 1
-                  AND publication_status IN ('unpublished', 'pending', 'partial', 'failed')
+                  AND processing_status != 'filtered_out'
+                  AND publication_status IN ('unpublished', 'pending', 'partial')
                 ORDER BY last_seen_at DESC
                 LIMIT 200
                 """,
@@ -1335,6 +1404,12 @@ class StorageService:
             for crow in cat_rows:
                 dk = crow["dedup_key"]
                 if dk in seen_dedup:
+                    continue
+                if active_dest_ids and all(
+                    (dk, d_id) in blocked_dk_dest
+                    or (cycle.deduplicate and self.is_offer_already_sent(dk, d_id, resend_after_hours=cycle.resend_after_hours))
+                    for d_id in active_dest_ids
+                ):
                     continue
                 if cycle.deduplicate:
                     if active_dest_ids:
@@ -1380,16 +1455,39 @@ class StorageService:
         success: bool,
         affiliate_url: Optional[str] = None,
         error: Optional[str] = None,
+        error_type: Optional[str] = None,
+        retry_after_seconds: Optional[float] = None,
+        api_status_code: Optional[int] = None,
     ) -> None:
         """Atualiza de forma transacional a fila (`offer_queue`) e o catálogo (`products_catalog`) após tentativa de envio."""
-        now = _now_iso()
-        retry_iso = (datetime.now().astimezone() + timedelta(seconds=30)).isoformat()
+        now_dt = datetime.now().astimezone()
+        now = now_dt.isoformat()
 
         with self._lock, self._connect() as conn:
+            # Verifica se existe registro específico para este destino; só cai para '__unassigned__' se não houver
+            target_row = conn.execute(
+                "SELECT id, attempts, max_attempts FROM offer_queue WHERE dedup_key = ? AND destination_id = ?",
+                (dedup_key, destination_id),
+            ).fetchone()
+            target_dest_filter = destination_id
+            if not target_row:
+                unassigned_row = conn.execute(
+                    "SELECT id, attempts, max_attempts FROM offer_queue WHERE dedup_key = ? AND destination_id = '__unassigned__'",
+                    (dedup_key,),
+                ).fetchone()
+                if unassigned_row:
+                    target_row = unassigned_row
+                    target_dest_filter = "__unassigned__"
+
             if success:
                 self._sent_keys_cache.add(dedup_key)
+                now_ts = now_dt.timestamp()
+                if now_ts > self._sent_keys_timestamp_cache.get(dedup_key, 0.0):
+                    self._sent_keys_timestamp_cache[dedup_key] = now_ts
                 if destination_id:
                     self._sent_dest_cache.add((dedup_key, destination_id))
+                    if now_ts > self._sent_dest_timestamp_cache.get((dedup_key, destination_id), 0.0):
+                        self._sent_dest_timestamp_cache[(dedup_key, destination_id)] = now_ts
 
                 conn.execute(
                     """
@@ -1398,17 +1496,89 @@ class StorageService:
                         attempts = attempts + 1,
                         affiliate_url = COALESCE(?, affiliate_url),
                         last_error = NULL,
+                        error_type = NULL,
+                        api_status_code = ?,
+                        next_retry_at = NULL,
                         sent_at = ?,
                         updated_at = ?
-                    WHERE dedup_key = ? AND destination_id IN (?, '__unassigned__')
+                    WHERE dedup_key = ? AND destination_id = ?
                     """,
-                    (affiliate_url, now, now, dedup_key, destination_id),
+                    (affiliate_url, api_status_code or 200, now, now, dedup_key, target_dest_filter),
                 )
+            else:
+                current_attempts = int(target_row["attempts"] or 0) if target_row else 0
+                max_attempts = int(target_row["max_attempts"] or 3) if target_row else 3
+                is_permanent = error_type in ("permanent", "config")
+                next_attempts = current_attempts + 1
+
+                if is_permanent or next_attempts >= max_attempts:
+                    new_q_status = "failed"
+                    retry_iso = None
+                else:
+                    new_q_status = "retry_wait"
+                    backoff_sec = max(
+                        float(retry_after_seconds or 0.0),
+                        min(300.0, 15.0 * (2 ** current_attempts)),
+                    )
+                    retry_iso = (now_dt + timedelta(seconds=backoff_sec)).isoformat()
+
+                conn.execute(
+                    """
+                    UPDATE offer_queue SET
+                        attempts = attempts + 1,
+                        status = ?,
+                        next_retry_at = ?,
+                        last_error = ?,
+                        error_type = ?,
+                        api_status_code = ?,
+                        updated_at = ?
+                    WHERE dedup_key = ? AND destination_id = ?
+                    """,
+                    (
+                        new_q_status,
+                        retry_iso,
+                        error,
+                        error_type,
+                        api_status_code,
+                        now,
+                        dedup_key,
+                        target_dest_filter,
+                    ),
+                )
+
+            # Calcula status agregado de publicação no catálogo considerando todos os destinos na fila
+            q_statuses = [
+                r["status"]
+                for r in conn.execute(
+                    "SELECT status FROM offer_queue WHERE dedup_key = ?",
+                    (dedup_key,),
+                ).fetchall()
+            ]
+            if q_statuses:
+                sent_n = sum(1 for s in q_statuses if s == "sent")
+                pending_n = sum(1 for s in q_statuses if s in ("pending", "retry_wait", "processing"))
+                if sent_n == len(q_statuses):
+                    agg_pub = "published"
+                    agg_proc = "published"
+                elif sent_n > 0:
+                    agg_pub = "partial"
+                    agg_proc = "queued" if pending_n > 0 else "published"
+                elif pending_n > 0:
+                    agg_pub = "pending"
+                    agg_proc = "queued"
+                else:
+                    agg_pub = "failed"
+                    agg_proc = "error"
+            else:
+                agg_pub = "published" if success else "failed"
+                agg_proc = "published" if success else "error"
+
+            if success:
                 conn.execute(
                     """
                     UPDATE products_catalog SET
-                        processing_status = 'published',
-                        publication_status = 'published',
+                        processing_status = ?,
+                        publication_status = ?,
                         affiliate_url = COALESCE(?, affiliate_url),
                         affiliate_status = 'generated',
                         last_published_destination_id = ?,
@@ -1416,29 +1586,18 @@ class StorageService:
                         last_error = NULL
                     WHERE product_id = ? OR dedup_key = ?
                     """,
-                    (affiliate_url, destination_id, now, product_id, dedup_key),
+                    (agg_proc, agg_pub, affiliate_url, destination_id, now, product_id, dedup_key),
                 )
             else:
                 conn.execute(
                     """
-                    UPDATE offer_queue SET
-                        attempts = attempts + 1,
-                        status = CASE WHEN (attempts + 1) >= max_attempts THEN 'failed' ELSE 'retry_wait' END,
-                        next_retry_at = CASE WHEN (attempts + 1) >= max_attempts THEN NULL ELSE ? END,
-                        last_error = ?,
-                        updated_at = ?
-                    WHERE dedup_key = ? AND destination_id IN (?, '__unassigned__')
-                    """,
-                    (retry_iso, error, now, dedup_key, destination_id),
-                )
-                conn.execute(
-                    """
                     UPDATE products_catalog SET
-                        publication_status = CASE WHEN publication_status = 'published' THEN 'published' ELSE 'failed' END,
+                        processing_status = ?,
+                        publication_status = ?,
                         last_error = ?
                     WHERE product_id = ? OR dedup_key = ?
                     """,
-                    (error, product_id, dedup_key),
+                    (agg_proc, agg_pub, error, product_id, dedup_key),
                 )
 
     def retry_failed_queue_items(self, cycle_id: Optional[str] = None) -> int:
@@ -1549,6 +1708,7 @@ class StorageService:
     @staticmethod
     def _row_to_queued_offer(row: sqlite3.Row) -> QueuedOfferRecord:
         snap = json.loads(row["product_snapshot_json"] or "{}")
+        rk = row.keys()
         return QueuedOfferRecord(
             id=row["id"],
             product_id=row["product_id"],
@@ -1565,6 +1725,8 @@ class StorageService:
             max_attempts=int(row["max_attempts"] or 3),
             next_retry_at=row["next_retry_at"],
             last_error=row["last_error"],
+            error_type=row["error_type"] if "error_type" in rk else None,
+            api_status_code=row["api_status_code"] if "api_status_code" in rk else None,
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             sent_at=row["sent_at"],
@@ -1621,9 +1783,9 @@ class StorageService:
                     duration_seconds, schedule_delay_seconds,
                     navigation_ms, extraction_ms, processing_ms, affiliate_ms, dispatch_ms,
                     bottleneck_stage, status,
-                    searched_count, filtered_count, affiliate_ok_count, affiliate_fail_count,
-                    deduplicated_new_count, sent_count, failed_send_count, error_message
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    searched_count, filtered_count, discarded_count, affiliate_ok_count, affiliate_fail_count,
+                    deduplicated_new_count, pending_count, sent_count, failed_send_count, error_message
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     scheduled_at = excluded.scheduled_at,
                     finished_at = excluded.finished_at,
@@ -1638,9 +1800,11 @@ class StorageService:
                     status = excluded.status,
                     searched_count = excluded.searched_count,
                     filtered_count = excluded.filtered_count,
+                    discarded_count = excluded.discarded_count,
                     affiliate_ok_count = excluded.affiliate_ok_count,
                     affiliate_fail_count = excluded.affiliate_fail_count,
                     deduplicated_new_count = excluded.deduplicated_new_count,
+                    pending_count = excluded.pending_count,
                     sent_count = excluded.sent_count,
                     failed_send_count = excluded.failed_send_count,
                     error_message = excluded.error_message
@@ -1665,9 +1829,11 @@ class StorageService:
                     run_log.status,
                     run_log.searched_count,
                     run_log.filtered_count,
+                    run_log.discarded_count,
                     run_log.affiliate_ok_count,
                     run_log.affiliate_fail_count,
                     run_log.deduplicated_new_count,
+                    run_log.pending_count,
                     run_log.sent_count,
                     run_log.failed_send_count,
                     run_log.error_message,
@@ -1710,9 +1876,11 @@ class StorageService:
                         status=r["status"],
                         searched_count=int(r["searched_count"]),
                         filtered_count=int(r["filtered_count"]),
+                        discarded_count=int(r["discarded_count"] or 0) if "discarded_count" in rk else 0,
                         affiliate_ok_count=int(r["affiliate_ok_count"]),
                         affiliate_fail_count=int(r["affiliate_fail_count"]),
                         deduplicated_new_count=int(r["deduplicated_new_count"]),
+                        pending_count=int(r["pending_count"] or 0) if "pending_count" in rk else 0,
                         sent_count=int(r["sent_count"]),
                         failed_send_count=int(r["failed_send_count"]),
                         error_message=r["error_message"],
@@ -1720,12 +1888,175 @@ class StorageService:
                 )
             return result
 
+    # -----------------------------------------------------------------
+    # Observabilidade Individual por Produto (product_audit_logs)
+    # -----------------------------------------------------------------
+
+    def record_product_audit_batch(self, records: list[ProductAuditRecord]) -> None:
+        """Persiste registros individuais de auditoria por produto em uma transação SQLite."""
+        if not records:
+            return
+        with self._lock, self._connect() as conn:
+            conn.executemany(
+                """
+                INSERT INTO product_audit_logs (
+                    id, run_id, cycle_id, cycle_name, product_id, dedup_key, source_id,
+                    destination_id, destination_name, filter_passed, filter_reason,
+                    queue_status, attempts, api_status_code, api_response,
+                    error_type, error_message, filter_ms, affiliate_ms, dispatch_ms,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    destination_id = COALESCE(excluded.destination_id, product_audit_logs.destination_id),
+                    destination_name = COALESCE(excluded.destination_name, product_audit_logs.destination_name),
+                    filter_passed = excluded.filter_passed,
+                    filter_reason = excluded.filter_reason,
+                    queue_status = excluded.queue_status,
+                    attempts = excluded.attempts,
+                    api_status_code = excluded.api_status_code,
+                    api_response = excluded.api_response,
+                    error_type = excluded.error_type,
+                    error_message = excluded.error_message,
+                    filter_ms = excluded.filter_ms,
+                    affiliate_ms = excluded.affiliate_ms,
+                    dispatch_ms = excluded.dispatch_ms,
+                    updated_at = excluded.updated_at
+                """,
+                [
+                    (
+                        r.id,
+                        r.run_id,
+                        r.cycle_id,
+                        r.cycle_name,
+                        r.product_id,
+                        r.dedup_key,
+                        r.source_id,
+                        r.destination_id,
+                        r.destination_name,
+                        1 if r.filter_passed else 0,
+                        r.filter_reason,
+                        r.queue_status,
+                        r.attempts,
+                        r.api_status_code,
+                        r.api_response,
+                        r.error_type,
+                        r.error_message,
+                        float(r.filter_ms),
+                        float(r.affiliate_ms),
+                        float(r.dispatch_ms),
+                        r.created_at,
+                        r.updated_at,
+                    )
+                    for r in records
+                ],
+            )
+
+    def list_product_audits(
+        self,
+        *,
+        limit: int = 100,
+        cycle_id: Optional[str] = None,
+        run_id: Optional[str] = None,
+        product_id: Optional[str] = None,
+    ) -> list[ProductAuditRecord]:
+        """Consulta logs individuais de auditoria por produto."""
+        clauses: list[str] = []
+        params: list[Any] = []
+        if cycle_id:
+            clauses.append("cycle_id = ?")
+            params.append(cycle_id)
+        if run_id:
+            clauses.append("run_id = ?")
+            params.append(run_id)
+        if product_id:
+            clauses.append("product_id = ?")
+            params.append(product_id)
+
+        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM product_audit_logs {where_sql} ORDER BY created_at DESC LIMIT ?",
+                params,
+            ).fetchall()
+            return [
+                ProductAuditRecord(
+                    id=r["id"],
+                    run_id=r["run_id"],
+                    cycle_id=r["cycle_id"],
+                    cycle_name=r["cycle_name"],
+                    product_id=r["product_id"],
+                    dedup_key=r["dedup_key"],
+                    source_id=r["source_id"],
+                    destination_id=r["destination_id"],
+                    destination_name=r["destination_name"],
+                    filter_passed=bool(r["filter_passed"]),
+                    filter_reason=r["filter_reason"],
+                    queue_status=r["queue_status"],
+                    attempts=int(r["attempts"] or 0),
+                    api_status_code=r["api_status_code"],
+                    api_response=r["api_response"],
+                    error_type=r["error_type"],
+                    error_message=r["error_message"],
+                    filter_ms=float(r["filter_ms"] or 0.0),
+                    affiliate_ms=float(r["affiliate_ms"] or 0.0),
+                    dispatch_ms=float(r["dispatch_ms"] or 0.0),
+                    created_at=r["created_at"],
+                    updated_at=r["updated_at"],
+                )
+                for r in rows
+            ]
+
+    def get_pipeline_metrics(self, cycle_id: Optional[str] = None) -> dict[str, int]:
+        """Retorna métricas agregadas de encontrados, elegíveis, descartados, pendentes, enviados e falhos."""
+        with self._lock, self._connect() as conn:
+            if cycle_id:
+                run_agg = conn.execute(
+                    """
+                    SELECT
+                        COALESCE(SUM(searched_count), 0) AS found,
+                        COALESCE(SUM(filtered_count), 0) AS eligible,
+                        COALESCE(SUM(discarded_count), 0) AS discarded
+                    FROM cycle_runs WHERE cycle_id = ?
+                    """,
+                    (cycle_id,),
+                ).fetchone()
+                q_rows = conn.execute(
+                    "SELECT status, COUNT(*) AS cnt FROM offer_queue WHERE cycle_id = ? GROUP BY status",
+                    (cycle_id,),
+                ).fetchall()
+            else:
+                run_agg = conn.execute(
+                    """
+                    SELECT
+                        COALESCE(SUM(searched_count), 0) AS found,
+                        COALESCE(SUM(filtered_count), 0) AS eligible,
+                        COALESCE(SUM(discarded_count), 0) AS discarded
+                    FROM cycle_runs
+                    """
+                ).fetchone()
+                q_rows = conn.execute(
+                    "SELECT status, COUNT(*) AS cnt FROM offer_queue GROUP BY status"
+                ).fetchall()
+
+            q_counts = {r["status"]: int(r["cnt"]) for r in q_rows}
+            return {
+                "found": int(run_agg["found"] or 0),
+                "eligible": int(run_agg["eligible"] or 0),
+                "discarded": int(run_agg["discarded"] or 0),
+                "pending": q_counts.get("pending", 0) + q_counts.get("retry_wait", 0) + q_counts.get("processing", 0),
+                "sent": q_counts.get("sent", 0),
+                "failed": q_counts.get("failed", 0),
+            }
+
     def clear_history(self) -> None:
-        """Limpa os registros de ofertas enviadas, fila, catálogo, execuções de ciclos e cache em memória."""
+        """Limpa os registros de ofertas enviadas, fila, catálogo, auditoria, execuções de ciclos e cache em memória."""
         with self._lock, self._connect() as conn:
             conn.execute("DELETE FROM sent_offers")
             conn.execute("DELETE FROM offer_queue")
             conn.execute("DELETE FROM products_catalog")
+            conn.execute("DELETE FROM product_audit_logs")
             conn.execute("DELETE FROM cycle_runs")
             self._sent_keys_cache.clear()
             self._sent_dest_cache.clear()
@@ -1734,11 +2065,12 @@ class StorageService:
         logger.info("Histórico de ofertas enviadas, fila, banco de produtos e execuções limpo.")
 
     def reset_all_data(self) -> None:
-        """Apaga todos os dados do aplicativo (ciclos, destinos, afiliados, templates, catálogo, fila e histórico) deixando-o vazio para nova configuração."""
+        """Apaga todos os dados do aplicativo (ciclos, destinos, afiliados, templates, catálogo, fila, auditoria e histórico) deixando-o vazio para nova configuração."""
         with self._lock, self._connect() as conn:
             conn.execute("DELETE FROM sent_offers")
             conn.execute("DELETE FROM offer_queue")
             conn.execute("DELETE FROM products_catalog")
+            conn.execute("DELETE FROM product_audit_logs")
             conn.execute("DELETE FROM cycle_runs")
             conn.execute("DELETE FROM cycles")
             conn.execute("DELETE FROM output_destinations")

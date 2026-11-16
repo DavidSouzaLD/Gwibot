@@ -360,6 +360,11 @@ class DeliveryResult(BaseModel):
     affiliate_url: Optional[str] = None
     external_message_id: Optional[str] = None
     error: Optional[str] = None
+    status_code: Optional[int] = None
+    error_type: Optional[Literal["transient", "permanent", "rate_limit", "config"]] = None
+    retry_after_seconds: Optional[float] = None
+    fallback_used: bool = False
+    delivery_method: Optional[str] = None
     attempts: int = 1
     timestamp: str = Field(default_factory=lambda: datetime.now().astimezone().isoformat())
 
@@ -473,9 +478,11 @@ class CycleRunLog(BaseModel):
     status: Literal["running", "completed", "partial", "failed"] = "running"
     searched_count: int = 0
     filtered_count: int = 0
+    discarded_count: int = 0
     affiliate_ok_count: int = 0
     affiliate_fail_count: int = 0
     deduplicated_new_count: int = 0
+    pending_count: int = 0
     sent_count: int = 0
     failed_send_count: int = 0
     error_message: Optional[str] = None
@@ -588,6 +595,35 @@ class QueuedOfferRecord(BaseModel):
     max_attempts: int = 3
     next_retry_at: Optional[str] = None
     last_error: Optional[str] = None
+    error_type: Optional[str] = None
+    api_status_code: Optional[int] = None
     created_at: str
     updated_at: str
     sent_at: Optional[str] = None
+
+
+class ProductAuditRecord(BaseModel):
+    """Registro individual de observabilidade por produto em cada etapa do pipeline."""
+
+    id: str
+    run_id: str
+    cycle_id: str
+    cycle_name: str
+    product_id: str
+    dedup_key: str
+    source_id: str
+    destination_id: Optional[str] = None
+    destination_name: Optional[str] = None
+    filter_passed: bool = True
+    filter_reason: Optional[str] = None
+    queue_status: Optional[str] = None
+    attempts: int = 0
+    api_status_code: Optional[int] = None
+    api_response: Optional[str] = None
+    error_type: Optional[str] = None
+    error_message: Optional[str] = None
+    filter_ms: float = 0.0
+    affiliate_ms: float = 0.0
+    dispatch_ms: float = 0.0
+    created_at: str
+    updated_at: str

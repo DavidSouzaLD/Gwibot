@@ -19,6 +19,7 @@ from app.models import (
     CycleFilters,
     CycleModel,
     CycleRunLog,
+    ProductAuditRecord,
     ProductItem,
     SentOfferRecord,
 )
@@ -118,24 +119,37 @@ class CycleScheduler:
     # -----------------------------------------------------------------
 
     @staticmethod
-    def passes_filters(item: ProductItem, filters: CycleFilters) -> bool:
-        """Avalia se um produto atende aos filtros de preço, desconto e avaliação do ciclo."""
+    def evaluate_filters(item: ProductItem, filters: CycleFilters) -> tuple[bool, str | None]:
+        """Avalia se um produto atende aos filtros do ciclo e retorna `(aprovado, motivo_descarte)`."""
+        if not item.url or not item.url.strip().startswith(("http://", "https://")):
+            return False, "Produto sem URL HTTP/HTTPS válida"
+
         price = item.promotional_price
         if filters.min_price is not None:
-            if price is None or price < filters.min_price:
-                return False
+            if price is None:
+                return False, f"Preço promocional ausente (mínimo exigido: R$ {filters.min_price:.2f})"
+            if price < filters.min_price:
+                return False, f"Preço R$ {price:.2f} abaixo do mínimo R$ {filters.min_price:.2f}"
         if filters.max_price is not None:
-            if price is None or price > filters.max_price:
-                return False
+            if price is None:
+                return False, f"Preço promocional ausente (máximo permitido: R$ {filters.max_price:.2f})"
+            if price > filters.max_price:
+                return False, f"Preço R$ {price:.2f} acima do máximo R$ {filters.max_price:.2f}"
         if filters.min_discount is not None and filters.min_discount > 0:
             discount = item.discount_percentage or 0
             if discount < filters.min_discount:
-                return False
+                return False, f"Desconto {discount}% abaixo do mínimo {filters.min_discount}%"
         if filters.min_rating is not None and filters.min_rating > 0:
             rating = item.rating or 0.0
             if rating < filters.min_rating:
-                return False
-        return True
+                return False, f"Avaliação {rating:.1f} abaixo do mínimo {filters.min_rating:.1f}"
+        return True, None
+
+    @classmethod
+    def passes_filters(cls, item: ProductItem, filters: CycleFilters) -> bool:
+        """Avalia se um produto atende aos filtros de preço, desconto e avaliação do ciclo."""
+        passed, _ = cls.evaluate_filters(item, filters)
+        return passed
 
     @staticmethod
     def build_dedup_key(source_id: str, item: ProductItem) -> str:
@@ -226,8 +240,10 @@ class CycleScheduler:
                 any_blocked = False
                 total_searched = 0
                 total_filtered = 0
+                total_discarded = 0
                 total_affiliate_ok = 0
                 total_affiliate_fail = 0
+                audit_records: dict[tuple[str, str], ProductAuditRecord] = {}
 
                 # ETAPA 0: Prioriza ofertas já armazenadas na Fila de Pendentes / Banco de Produtos
                 t_q_start = time.perf_counter()
@@ -334,15 +350,50 @@ class CycleScheduler:
 
                     filtered_page: list[ProductItem] = []
                     for p in raw_products_page:
-                        prod_id, _ = storage_service.canonical_product_identity(cycle.source_id, p)
+                        t_f_item = time.perf_counter()
+                        prod_id, prod_dk = storage_service.canonical_product_identity(cycle.source_id, p)
                         if not p.id:
                             p.id = prod_id
-                        if self.passes_filters(p, cycle.filters):
+                        passed, discard_reason = self.evaluate_filters(p, cycle.filters)
+                        f_ms = round((time.perf_counter() - t_f_item) * 1000.0, 2)
+                        now_audit = _now_iso()
+                        if passed:
                             filtered_page.append(p)
+                            audit_records[(prod_dk, "__pipeline__")] = ProductAuditRecord(
+                                id=f"aud_{run_id}_{prod_id}",
+                                run_id=run_id,
+                                cycle_id=cycle.id,
+                                cycle_name=cycle.name,
+                                product_id=prod_id,
+                                dedup_key=prod_dk,
+                                source_id=cycle.source_id,
+                                filter_passed=True,
+                                queue_status="eligible",
+                                filter_ms=f_ms,
+                                created_at=now_audit,
+                                updated_at=now_audit,
+                            )
                         else:
+                            total_discarded += 1
                             storage_service.update_catalog_product_status(
                                 prod_id,
                                 processing_status="filtered_out",
+                                last_error=discard_reason,
+                            )
+                            audit_records[(prod_dk, "__pipeline__")] = ProductAuditRecord(
+                                id=f"aud_{run_id}_{prod_id}",
+                                run_id=run_id,
+                                cycle_id=cycle.id,
+                                cycle_name=cycle.name,
+                                product_id=prod_id,
+                                dedup_key=prod_dk,
+                                source_id=cycle.source_id,
+                                filter_passed=False,
+                                filter_reason=discard_reason,
+                                queue_status="discarded",
+                                filter_ms=f_ms,
+                                created_at=now_audit,
+                                updated_at=now_audit,
                             )
 
                     total_filtered += len(filtered_page)
@@ -352,21 +403,34 @@ class CycleScheduler:
                     t_aff_start = time.perf_counter()
                     if filtered_page:
                         await aff_provider.enrich_products(filtered_page, config=aff_config)
-                    aff_ms_acc += (time.perf_counter() - t_aff_start) * 1000.0
+                    aff_page_ms = (time.perf_counter() - t_aff_start) * 1000.0
+                    aff_ms_acc += aff_page_ms
+                    per_item_aff_ms = round(aff_page_ms / max(1, len(filtered_page)), 2)
 
                     # ETAPA 4: Deduplicação por ID/Destino & Enfileiramento na Fila de Pendentes
                     t_dedup_start = time.perf_counter()
                     eligible_with_keys: list[tuple[str, ProductItem]] = []
                     for item in filtered_page:
+                        prod_id, dedup_key = storage_service.canonical_product_identity(cycle.source_id, item)
+                        aud = audit_records.get((dedup_key, "__pipeline__"))
+                        if aud:
+                            aud.affiliate_ms = per_item_aff_ms
                         if item.affiliate_status == "generated" and item.affiliate_url:
                             total_affiliate_ok += 1
                         else:
                             total_affiliate_fail += 1
 
                         if cycle.filters.require_affiliate_link and item.affiliate_status != "generated":
+                            total_discarded += 1
+                            if aud:
+                                aud.filter_passed = False
+                                aud.filter_reason = item.affiliate_error or "Falha na geração do link de afiliado"
+                                aud.queue_status = "discarded"
+                                aud.error_type = "affiliate"
+                                aud.error_message = item.affiliate_error
+                                aud.updated_at = _now_iso()
                             continue
 
-                        dedup_key = self.build_dedup_key(cycle.source_id, item)
                         if not dedup_key or dedup_key in seen_in_batch:
                             continue
                         seen_in_batch.add(dedup_key)
@@ -423,15 +487,33 @@ class CycleScheduler:
                         candidates=candidates_to_send,
                         destinations=destinations,
                         resend_after_hours=cycle.resend_after_hours,
+                        deduplicate=cycle.deduplicate,
                     )
+
+                # Filtra apenas candidatos que ainda precisam ser enviados a pelo menos 1 destino ativo
+                if destinations and cycle.deduplicate:
+                    deliverable_candidates = [
+                        (dk, it)
+                        for dk, it in candidates_to_send
+                        if any(
+                            dest.id
+                            and not storage_service.is_offer_already_sent(
+                                dk, dest.id, resend_after_hours=cycle.resend_after_hours
+                            )
+                            for dest in destinations
+                        )
+                    ]
+                else:
+                    deliverable_candidates = list(candidates_to_send)
 
                 run_log.searched_count = total_searched
                 run_log.filtered_count = total_filtered
+                run_log.discarded_count = total_discarded
                 run_log.affiliate_ok_count = total_affiliate_ok
                 run_log.affiliate_fail_count = total_affiliate_fail
-                run_log.deduplicated_new_count = len(candidates_to_send)
+                run_log.deduplicated_new_count = len(deliverable_candidates)
 
-                if any_blocked and not candidates_to_send:
+                if any_blocked and not deliverable_candidates:
                     err_msg = " | ".join(kw_warnings) or "Coleta bloqueada por verificação do site."
                     run_log.status = "failed"
                     run_log.error_message = err_msg
@@ -449,11 +531,23 @@ class CycleScheduler:
                         run_log.affiliate_ms,
                         run_log.dispatch_ms,
                     )
+                    storage_service.record_product_audit_batch(list(audit_records.values()))
                     storage_service.save_cycle_run(run_log)
+                    refreshed_blk = storage_service.get_cycle(cycle.id)
+                    cur_state_blk = refreshed_blk.state if refreshed_blk else cycle.state
+                    next_blk = (
+                        self.compute_next_scheduled_slot(
+                            scheduled_dt=scheduled_dt,
+                            interval_minutes=cycle.interval_minutes,
+                        ).isoformat()
+                        if cur_state_blk == "running"
+                        else None
+                    )
                     storage_service.update_cycle_state(
                         cycle.id,
-                        cycle.state,
+                        cur_state_blk,
                         last_run_at=run_log.finished_at,
+                        next_run_at=next_blk,
                         increment_runs=True,
                         last_error=err_msg,
                         last_page_offset=1,
@@ -463,24 +557,23 @@ class CycleScheduler:
                     )
                     return False, run_log, err_msg
 
-                selected_offers = candidates_to_send[: cycle.max_offers_per_run]
-                remaining_queued = max(0, len(candidates_to_send) - len(selected_offers))
+                selected_offers = deliverable_candidates[: cycle.max_offers_per_run]
+                remaining_queued = max(0, len(deliverable_candidates) - len(selected_offers))
                 logger.info(
                     "Ciclo '%s' | Fila & Deduplicação: %d disponíveis (%d buscados em %d pág.) -> %d selecionados para envio, %d mantidos na fila.",
                     cycle.name,
-                    len(candidates_to_send),
+                    len(deliverable_candidates),
                     total_searched,
                     pages_scanned,
                     len(selected_offers),
                     remaining_queued,
                 )
 
-                # ETAPA 5: OUTPUT DISPATCH (Garantia de não publicar 2x no mesmo destino + controle de tentativas)
+                # ETAPA 5: OUTPUT DISPATCH (Garantia de não publicar 2x no mesmo destino + persistência imediata por produto)
                 t_disp_start = time.perf_counter()
                 sent_count = 0
                 failed_send_count = 0
                 last_send_error: str | None = None
-                records_to_persist: list[SentOfferRecord] = []
 
                 if not destinations and selected_offers:
                     last_send_error = "Nenhum destino de saída ativo vinculado a este ciclo."
@@ -506,6 +599,7 @@ class CycleScheduler:
                         if not target_dests_for_item:
                             continue
 
+                        t_item_disp = time.perf_counter()
                         deliveries = await asyncio.gather(
                             *(
                                 output_registry.get(dest.output_type).send_offer(
@@ -514,10 +608,13 @@ class CycleScheduler:
                                 for dest in target_dests_for_item
                             )
                         )
+                        item_disp_ms = round((time.perf_counter() - t_item_disp) * 1000.0, 2)
                         now_sent_iso = _now_iso()
+                        item_records: list[SentOfferRecord] = []
+
                         for dest, delivery in zip(target_dests_for_item, deliveries):
                             dest_id_str = dest.id or "unknown"
-                            err_detail = delivery.error or (None if delivery.success else delivery.message)
+                            err_detail = delivery.error or (None if delivery.success else "Falha ao enviar oferta.")
                             offer_record = SentOfferRecord(
                                 id=f"offer_{uuid.uuid4().hex[:10]}",
                                 dedup_key=dedup_key,
@@ -539,7 +636,7 @@ class CycleScheduler:
                                 error_message=err_detail,
                                 sent_at=now_sent_iso,
                             )
-                            records_to_persist.append(offer_record)
+                            item_records.append(offer_record)
 
                             storage_service.mark_queue_delivery_outcome(
                                 product_id=prod_id,
@@ -548,13 +645,48 @@ class CycleScheduler:
                                 success=delivery.success,
                                 affiliate_url=item.affiliate_url,
                                 error=err_detail,
+                                error_type=delivery.error_type,
+                                retry_after_seconds=delivery.retry_after_seconds,
+                                api_status_code=delivery.status_code,
                             )
+
+                            base_aud = audit_records.get((dedup_key, "__pipeline__"))
+                            audit_records[(dedup_key, dest_id_str)] = ProductAuditRecord(
+                                id=f"aud_{run_id}_{prod_id}_{dest_id_str}",
+                                run_id=run_id,
+                                cycle_id=cycle.id,
+                                cycle_name=cycle.name,
+                                product_id=prod_id,
+                                dedup_key=dedup_key,
+                                source_id=cycle.source_id,
+                                destination_id=dest_id_str,
+                                destination_name=dest.name,
+                                filter_passed=True,
+                                queue_status="sent" if delivery.success else (
+                                    "failed" if delivery.error_type in ("permanent", "config") else "retry_wait"
+                                ),
+                                attempts=delivery.attempts,
+                                api_status_code=delivery.status_code,
+                                api_response=delivery.external_message_id or delivery.delivery_method,
+                                error_type=delivery.error_type,
+                                error_message=err_detail,
+                                filter_ms=base_aud.filter_ms if base_aud else 0.0,
+                                affiliate_ms=base_aud.affiliate_ms if base_aud else 0.0,
+                                dispatch_ms=item_disp_ms,
+                                created_at=now_sent_iso,
+                                updated_at=now_sent_iso,
+                            )
+                            audit_records.pop((dedup_key, "__pipeline__"), None)
 
                             if delivery.success:
                                 sent_count += 1
                             else:
                                 failed_send_count += 1
                                 last_send_error = err_detail
+
+                        # Persiste imediatamente após cada produto para evitar perda/duplicação em crash/reinício
+                        if item_records:
+                            storage_service.record_sent_offers_batch(item_records)
 
                     if (
                         idx < len(selected_offers) - 1
@@ -572,11 +704,9 @@ class CycleScheduler:
                         )
                         await asyncio.sleep(delay_sec)
 
-                if records_to_persist:
-                    storage_service.record_sent_offers_batch(records_to_persist)
-
                 disp_ms_acc += (time.perf_counter() - t_disp_start) * 1000.0
 
+                run_log.pending_count = remaining_queued
                 run_log.sent_count = sent_count
                 run_log.failed_send_count = failed_send_count
                 run_log.finished_at = _now_iso()
@@ -601,6 +731,7 @@ class CycleScheduler:
                     if failed_send_count == 0
                     else ("partial" if sent_count > 0 else "failed")
                 )
+                storage_service.record_product_audit_batch(list(audit_records.values()))
                 storage_service.save_cycle_run(run_log)
 
                 refreshed = storage_service.get_cycle(cycle.id)
@@ -665,10 +796,24 @@ class CycleScheduler:
                 run_log.dispatch_ms,
             )
             storage_service.save_cycle_run(run_log)
+            # Preserva o estado 'running' em falhas transitórias para que o loop continue e recupere automaticamente
+            refreshed_err = storage_service.get_cycle(cycle.id)
+            cur_state_err = refreshed_err.state if refreshed_err else cycle.state
+            is_config_fatal = isinstance(exc, (KeyError, ValueError)) or "não está ativa" in err_str
+            target_state = "error" if (is_config_fatal or cur_state_err != "running") else "running"
+            next_run_err = (
+                self.compute_next_scheduled_slot(
+                    scheduled_dt=scheduled_dt,
+                    interval_minutes=cycle.interval_minutes,
+                ).isoformat()
+                if target_state == "running"
+                else None
+            )
             storage_service.update_cycle_state(
                 cycle.id,
-                "error",
+                target_state,
                 last_run_at=run_log.finished_at,
+                next_run_at=next_run_err,
                 increment_runs=True,
                 last_error=err_str,
                 last_duration_seconds=run_log.duration_seconds,
@@ -779,9 +924,18 @@ class CycleScheduler:
 
         cycles = storage_service.list_cycles()
         recovered = 0
+        now_dt = _now_dt()
+        pending_queue_cycles = {
+            q.cycle_id
+            for q in storage_service.list_offer_queue(limit=500)
+            if q.status in ("pending", "retry_wait", "processing")
+        }
         for c in cycles:
             if c.state == "running":
-                await self.start_cycle(c.id, run_immediately=False)
+                next_dt = _parse_iso_safe(c.next_run_at)
+                overdue = next_dt is not None and next_dt <= now_dt
+                has_pending = c.id in pending_queue_cycles
+                await self.start_cycle(c.id, run_immediately=(overdue or has_pending))
                 recovered += 1
         if recovered:
             logger.info("Recuperados %d ciclos ativos após inicialização do servidor.", recovered)
