@@ -97,7 +97,11 @@ class AuthStatusResponse(BaseModel):
     authenticated: bool = Field(..., description="True se a sessão está autenticada e válida")
     state: AuthStateType = Field(..., description="Estado atual da sessão")
     message: str = Field(..., description="Mensagem amigável para exibição na interface")
-    has_saved_session: bool = Field(..., description="Indica se o arquivo de sessão existe em disco")
+    has_saved_session: bool = Field(..., description="Indica se o arquivo de sessão ou perfil existe em disco")
+    persistent_profile_ready: bool = Field(
+        default=False,
+        description="True se o perfil persistente do Chromium (user_data_dir) está inicializado e preservado",
+    )
     updated_at: Optional[str] = Field(default=None, description="Timestamp ISO-8601 da última atualização")
 
 
@@ -497,3 +501,91 @@ class SentOfferRecord(BaseModel):
     status: Literal["sent", "failed"] = "sent"
     error_message: Optional[str] = None
     sent_at: str
+
+
+ProductProcessingStatusType = Literal[
+    "discovered",
+    "filtered_out",
+    "queued",
+    "affiliate_ready",
+    "published",
+    "error",
+]
+ProductPublicationStatusType = Literal[
+    "unpublished",
+    "pending",
+    "published",
+    "partial",
+    "failed",
+]
+QueueOfferStatusType = Literal[
+    "pending",
+    "processing",
+    "retry_wait",
+    "sent",
+    "failed",
+]
+
+
+class CatalogProductRecord(BaseModel):
+    """Registro persistente no Banco de Produtos (products_catalog) identificado pelo ID do Mercado Livre."""
+
+    product_id: str = Field(..., description="ID único canônico do produto (ex: MLB123456789)")
+    dedup_key: str = Field(..., description="Chave canônica de deduplicação (ex: mercadolivre:mlb123456789)")
+    source_id: str = Field(default="mercadolivre", description="Fonte onde o produto foi encontrado")
+    query_terms: str = Field(default="", description="Palavras-chave associadas ao produto")
+    name: str = Field(..., description="Nome/título coletado")
+    product_url: str = Field(..., description="URL original do produto")
+    affiliate_url: Optional[str] = Field(default=None, description="Link afiliado gerado")
+    affiliate_status: Optional[AffiliateStatusType] = Field(default=None, description="Status do link afiliado")
+    original_price: Optional[float] = None
+    promotional_price: Optional[float] = None
+    discount_percentage: Optional[int] = None
+    rating: Optional[float] = None
+    reviews_count: Optional[int] = None
+    seller: Optional[str] = None
+    image_url: Optional[str] = None
+    available: bool = Field(default=True, description="Se o produto está disponível no último scrape")
+    first_seen_at: str = Field(..., description="Data/hora da primeira identificação")
+    last_seen_at: str = Field(..., description="Data/hora da última identificação/atualização de preço")
+    processing_status: ProductProcessingStatusType = Field(
+        default="discovered",
+        description="Status de processamento ('discovered', 'filtered_out', 'queued', 'affiliate_ready', 'published', 'error')",
+    )
+    publication_status: ProductPublicationStatusType = Field(
+        default="unpublished",
+        description="Status de publicação ('unpublished', 'pending', 'published', 'partial', 'failed')",
+    )
+    last_published_destination_id: Optional[str] = Field(
+        default=None,
+        description="Último destino onde o produto foi publicado",
+    )
+    last_published_at: Optional[str] = Field(
+        default=None,
+        description="Data/hora do último envio bem-sucedido",
+    )
+    times_seen: int = Field(default=1, description="Quantidade de vezes que o produto foi avistado")
+    last_error: Optional[str] = Field(default=None, description="Último erro de processamento ou envio")
+
+
+class QueuedOfferRecord(BaseModel):
+    """Item na fila persistente de ofertas pendentes (offer_queue) para publicação controlada por destino."""
+
+    id: str
+    product_id: str
+    dedup_key: str
+    cycle_id: str
+    cycle_name: str
+    source_id: str = "mercadolivre"
+    destination_id: str
+    destination_name: str
+    product_snapshot: ProductItem
+    affiliate_url: Optional[str] = None
+    status: QueueOfferStatusType = "pending"
+    attempts: int = 0
+    max_attempts: int = 3
+    next_retry_at: Optional[str] = None
+    last_error: Optional[str] = None
+    created_at: str
+    updated_at: str
+    sent_at: Optional[str] = None

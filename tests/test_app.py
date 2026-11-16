@@ -425,6 +425,8 @@ def test_full_pipeline_mercadolivre_to_affiliate_to_telegram() -> None:
         assert stop_res.json()["state"] == "stopped"
     finally:
         scraper_service._route_handler = None
+        scraper_service.clear_cooldown()
+
 
 
 def test_session_persistence_logout_and_expiration_detection() -> None:
@@ -493,6 +495,8 @@ def test_session_persistence_logout_and_expiration_detection() -> None:
         assert after_status["state"] == "expired"
     finally:
         scraper_service._route_handler = None
+        scraper_service.clear_cooldown()
+
 
     res_logout = client.post("/api/auth/logout")
     assert res_logout.status_code == 200
@@ -744,6 +748,8 @@ def test_multi_keywords_cycle_edit_and_product_delay_validation() -> None:
         assert any("Mochila Impermeável Pro" in c for c in captions)
     finally:
         scraper_service._route_handler = None
+        scraper_service.clear_cooldown()
+
 
 
 def test_affiliate_sources_destination_editing_and_platform_templates() -> None:
@@ -1043,6 +1049,8 @@ def test_idempotent_creation_and_pagination_unblock() -> None:
         assert refreshed_cycle.last_page_offset > 1
     finally:
         scraper_service._route_handler = None
+        scraper_service.clear_cooldown()
+
 
 
 def test_performance_optimizations_stage_metrics_and_1min_scheduler() -> None:
@@ -1241,6 +1249,399 @@ def test_performance_optimizations_stage_metrics_and_1min_scheduler() -> None:
         assert partial_run["sent_count"] == 1
     finally:
         scraper_service._route_handler = None
+        scraper_service.clear_cooldown()
+
+
+def test_persistent_profile_2fa_product_catalog_queue_retry_and_captcha_cooldown(tmp_path: Path) -> None:
+    """
+    Valida integralmente os 6 requisitos da reformulação:
+    1. Reinicialização sem perda de autenticação (perfil persistente user_data_dir + storage_state).
+    2. Persistência do login 2FA (cookies + localStorage / device trust preservados no chromium_profile).
+    3. Recuperação de produtos pendentes (fila local despacha sem nova navegação no navegador).
+    4. Deduplicação entre ciclos e por destino (nunca publica 2x no mesmo destino).
+    5. Retomada após falha de envio (retry_wait -> rearm -> sent).
+    6. Comportamento adequado diante de CAPTCHA (interrupção imediata + cooldown sem destruir perfil/sessão).
+    """
+    from unittest.mock import patch
+    from playwright.sync_api import Route, sync_playwright
+    from app.models import DeliveryResult
+    from app.session_manager import SessionManager
+
+    storage_service.clear_history()
+    scraper_service.clear_cache()
+    scraper_service.clear_cooldown()
+
+    # =========================================================================
+    # 1 & 2. Reinicialização sem perda de autenticação + Persistência de 2FA (user_data_dir)
+    # =========================================================================
+    isolated_state_file = tmp_path / "ml_storage_state.json"
+    isolated_meta_file = tmp_path / "ml_session_meta.json"
+    isolated_profile_dir = tmp_path / "chromium_profile"
+
+    sm1 = SessionManager(
+        session_dir=tmp_path,
+        state_file=isolated_state_file,
+        meta_file=isolated_meta_file,
+        profile_dir=isolated_profile_dir,
+    )
+
+    # Abre contexto persistente #1, grava cookie SSID + token de confiança 2FA em localStorage
+    with sync_playwright() as pw:
+        with sm1.open_persistent_context(pw, headless=True) as (context, page):
+            page.route(
+                "https://www.mercadolivre.com.br/**",
+                lambda route: route.fulfill(
+                    status=200,
+                    content_type="text/html",
+                    body="<html><body>Mercado Livre Trusted Device</body></html>",
+                ),
+            )
+            page.goto("https://www.mercadolivre.com.br/")
+            page.evaluate("() => window.localStorage.setItem('ml_2fa_trusted_device', 'TRUST_TOKEN_XYZ_999')")
+            context.add_cookies(
+                [
+                    {
+                        "name": "ssid",
+                        "value": "persistent-2fa-session-id",
+                        "domain": ".mercadolivre.com.br",
+                        "path": "/",
+                        "httpOnly": True,
+                        "secure": True,
+                    },
+                    {
+                        "name": "orgnickp",
+                        "value": "USUARIO_2FA_PERSISTENTE",
+                        "domain": ".mercadolivre.com.br",
+                        "path": "/",
+                    },
+                ]
+            )
+            state_snapshot = context.storage_state()
+            sm1._save_storage_state(state_snapshot)
+
+    # Simula reinicialização completa do servidor instanciando um novo SessionManager apontando para o mesmo disco
+    sm_restarted = SessionManager(
+        session_dir=tmp_path,
+        state_file=isolated_state_file,
+        meta_file=isolated_meta_file,
+        profile_dir=isolated_profile_dir,
+    )
+    status_after_restart = sm_restarted.get_status()
+    assert status_after_restart.authenticated is True
+    assert status_after_restart.state == "logged_in"
+    assert status_after_restart.persistent_profile_ready is True
+
+    # Abre contexto persistente #2 após o "restart" e comprova que tanto cookies quanto localStorage 2FA permanecem vivos
+    with sync_playwright() as pw:
+        with sm_restarted.open_persistent_context(pw, headless=True) as (context2, page2):
+            page2.route(
+                "https://www.mercadolivre.com.br/**",
+                lambda route: route.fulfill(
+                    status=200,
+                    content_type="text/html",
+                    body="<html><body>Reopened Session</body></html>",
+                ),
+            )
+            page2.goto("https://www.mercadolivre.com.br/")
+            recovered_2fa_token = page2.evaluate("() => window.localStorage.getItem('ml_2fa_trusted_device')")
+            assert recovered_2fa_token == "TRUST_TOKEN_XYZ_999"
+            cookie_names = {c["name"] for c in context2.cookies()}
+            assert "ssid" in cookie_names
+
+    # Verifica que mark_session_expired NÃO apaga o perfil persistente (preserva dispositivo confiável 2FA)
+    sm_restarted.mark_session_expired("Teste de expiração sem perda de perfil 2FA")
+    assert isolated_profile_dir.exists()
+    assert sm_restarted._has_profile_cookies_on_disk() is True
+
+    # Apenas logout manual limpa o perfil e os arquivos de sessão
+    sm_restarted.logout()
+    assert sm_restarted.get_status().authenticated is False
+    assert sm_restarted._has_profile_cookies_on_disk() is False
+
+    # =========================================================================
+    # 3 & 4. Banco de Produtos + Fila de Pendentes sem Re-coleta + Deduplicação por Destino
+    # =========================================================================
+    output_registry.register(
+        TelegramOutputSource(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, json={"ok": True, "result": {"message_id": 777}})
+            )
+        )
+    )
+    client.put(
+        "/api/affiliates/config",
+        json={
+            "enabled": True,
+            "matt_word": "gwibot_2fa_test",
+            "matt_tool": "88776655",
+            "require_valid_affiliate": True,
+        },
+    )
+
+    dest_a_res = client.post(
+        "/api/outputs",
+        json={
+            "name": "Telegram Canal A Principal",
+            "output_type": "telegram",
+            "enabled": True,
+            "config": {"bot_token": "111111:TOKEN_A", "chat_id": "-100111111"},
+        },
+    )
+    assert dest_a_res.status_code == 200
+    dest_a_id = dest_a_res.json()["id"]
+
+    dest_b_res = client.post(
+        "/api/outputs",
+        json={
+            "name": "Telegram Canal B Secundário",
+            "output_type": "telegram",
+            "enabled": True,
+            "config": {"bot_token": "222222:TOKEN_B", "chat_id": "-100222222"},
+        },
+    )
+    assert dest_b_res.status_code == 200
+    dest_b_id = dest_b_res.json()["id"]
+
+    # Ciclo com max_offers_per_run=1, porém a página retorna 3 produtos inéditos (MLB950001, MLB950002, MLB950003)
+    cycle_q_res = client.post(
+        "/api/cycles",
+        json={
+            "name": "Ciclo Fila Persistente",
+            "query": "placa de video",
+            "source_id": "mercadolivre",
+            "search_limit": 5,
+            "max_offers_per_run": 1,
+            "interval_minutes": 5,
+            "product_delay_minutes": 0.0,
+            "destination_ids": [dest_a_id],
+            "deduplicate": True,
+            "filters": {"require_affiliate_link": True},
+        },
+    )
+    assert cycle_q_res.status_code == 200
+    cycle_q_id = cycle_q_res.json()["id"]
+
+    three_products_html = """
+    <!DOCTYPE html><html><body>
+      <ol class="ui-search-layout">
+        <li class="ui-search-layout__item">
+          <div class="poly-card">
+            <a class="poly-component__title" href="https://www.mercadolivre.com.br/gpu-1/p/MLB950001">RTX 4060 8GB #1</a>
+            <div class="poly-component__price"><div class="poly-price__current">
+              <span class="andes-money-amount"><span class="andes-money-amount__fraction">1899</span></span>
+            </div></div>
+          </div>
+        </li>
+        <li class="ui-search-layout__item">
+          <div class="poly-card">
+            <a class="poly-component__title" href="https://www.mercadolivre.com.br/gpu-2/p/MLB950002">RTX 4060 Ti 8GB #2</a>
+            <div class="poly-component__price"><div class="poly-price__current">
+              <span class="andes-money-amount"><span class="andes-money-amount__fraction">2399</span></span>
+            </div></div>
+          </div>
+        </li>
+        <li class="ui-search-layout__item">
+          <div class="poly-card">
+            <a class="poly-component__title" href="https://www.mercadolivre.com.br/gpu-3/p/MLB950003">RTX 4070 Super #3</a>
+            <div class="poly-component__price"><div class="poly-price__current">
+              <span class="andes-money-amount"><span class="andes-money-amount__fraction">3899</span></span>
+            </div></div>
+          </div>
+        </li>
+      </ol>
+    </body></html>
+    """
+
+    browser_requests_count = 0
+
+    def counting_route(route: Route) -> None:
+        nonlocal browser_requests_count
+        browser_requests_count += 1
+        route.fulfill(status=200, content_type="text/html; charset=utf-8", body=three_products_html)
+
+    scraper_service._route_handler = counting_route
+    try:
+        # Execução #1: Coleta os 3 produtos da página, cataloga os 3 no banco, enfileira os 3 e envia apenas 1 (max_offers_per_run=1)
+        run1_res = client.post(f"/api/cycles/{cycle_q_id}/run-now")
+        assert run1_res.status_code == 200
+        run1 = run1_res.json()
+        assert run1["searched_count"] == 3
+        assert run1["sent_count"] == 1
+        assert browser_requests_count == 1
+
+        # Verifica que os 3 produtos estão no Banco de Produtos (/api/products)
+        catalog_res = client.get("/api/products")
+        assert catalog_res.status_code == 200
+        catalog_ids = {p["product_id"] for p in catalog_res.json()}
+        assert {"MLB950001", "MLB950002", "MLB950003"}.issubset(catalog_ids)
+
+        # Verifica que há 2 ofertas com status 'pending' na Fila Persistente (/api/queue)
+        queue_pending_res = client.get(f"/api/queue?status=pending&cycle_id={cycle_q_id}")
+        assert queue_pending_res.status_code == 200
+        assert len(queue_pending_res.json()) == 2
+
+        # Execução #2: Deve recuperar o próximo produto pendente da fila local SEM abrir o navegador (browser_requests_count continua 1!)
+        run2_res = client.post(f"/api/cycles/{cycle_q_id}/run-now")
+        assert run2_res.status_code == 200
+        run2 = run2_res.json()
+        assert run2["sent_count"] == 1
+        assert run2["searched_count"] == 0
+        assert run2["navigation_ms"] == 0.0
+        assert browser_requests_count == 1  # Zero novas requisições ao Mercado Livre!
+
+        # 4. Deduplicação entre ciclos e por destino:
+        # Criamos um Segundo Ciclo apontando para o MESMO destino A: ele só pode enviar o 1 produto restante (MLB950003) e nunca reenviar MLB950001/MLB950002
+        cycle_dup_res = client.post(
+            "/api/cycles",
+            json={
+                "name": "Ciclo Segundo Mesmo Destino",
+                "query": "placa de video",
+                "source_id": "mercadolivre",
+                "search_limit": 5,
+                "max_offers_per_run": 5,
+                "interval_minutes": 5,
+                "product_delay_minutes": 0.0,
+                "destination_ids": [dest_a_id],
+                "deduplicate": True,
+                "filters": {"require_affiliate_link": True},
+            },
+        )
+        cycle_dup_id = cycle_dup_res.json()["id"]
+        run_dup = client.post(f"/api/cycles/{cycle_dup_id}/run-now").json()
+        assert run_dup["sent_count"] == 1  # Apenas o MLB950003 que faltava!
+
+        # Se rodarmos novamente para o Destino A, como todos os 3 já foram enviados ao Destino A, sent_count DEVE ser 0
+        run_dup_again = client.post(f"/api/cycles/{cycle_dup_id}/run-now").json()
+        assert run_dup_again["sent_count"] == 0
+
+        # Porém, um ciclo apontando para o Destino B (novo canal) consegue publicar normalmente sem conflito
+        cycle_dest_b_res = client.post(
+            "/api/cycles",
+            json={
+                "name": "Ciclo Destino B Independente",
+                "query": "placa de video",
+                "source_id": "mercadolivre",
+                "search_limit": 5,
+                "max_offers_per_run": 2,
+                "interval_minutes": 5,
+                "product_delay_minutes": 0.0,
+                "destination_ids": [dest_b_id],
+                "deduplicate": True,
+                "filters": {"require_affiliate_link": True},
+            },
+        )
+        cycle_dest_b_id = cycle_dest_b_res.json()["id"]
+        run_dest_b = client.post(f"/api/cycles/{cycle_dest_b_id}/run-now").json()
+        assert run_dest_b["sent_count"] == 2
+
+        # =====================================================================
+        # 5. Retomada após falha de envio (retry_wait -> retry -> sent)
+        # =====================================================================
+        # Na fila do Destino B sobrou 1 item pendente (MLB950003). Ajustamos max_offers_per_run=1 e simulamos falha temporária no envio!
+        client.put(
+            f"/api/cycles/{cycle_dest_b_id}",
+            json={
+                "name": "Ciclo Destino B Independente",
+                "query": "placa de video",
+                "source_id": "mercadolivre",
+                "search_limit": 5,
+                "max_offers_per_run": 1,
+                "interval_minutes": 5,
+                "product_delay_minutes": 0.0,
+                "destination_ids": [dest_b_id],
+                "deduplicate": True,
+                "filters": {"require_affiliate_link": True},
+            },
+        )
+
+        async def mock_failing_send(offer, destination, **kwargs):
+            return DeliveryResult(
+                output_id=destination.id,
+                destination_name=destination.name,
+                output_type=destination.output_type,
+                success=False,
+                error="Timeout temporário simulado na API do Telegram",
+            )
+
+        with patch("app.outputs.TelegramOutputSource.send_offer", side_effect=mock_failing_send):
+            fail_run = client.post(f"/api/cycles/{cycle_dest_b_id}/run-now").json()
+            assert fail_run["sent_count"] == 0
+            assert fail_run["failed_send_count"] == 1
+
+        # Verifica que o item entrou em 'retry_wait' com attempts=1 e erro registrado
+        retry_queue = client.get(f"/api/queue?status=retry_wait&cycle_id={cycle_dest_b_id}").json()
+        assert len(retry_queue) == 1
+        assert retry_queue[0]["attempts"] == 1
+        assert "Timeout temporário" in retry_queue[0]["last_error"]
+
+        # Rearma a fila para retentativa imediata via endpoint /api/queue/retry e executa o ciclo novamente
+        rearm_res = client.post(f"/api/queue/retry?cycle_id={cycle_dest_b_id}")
+        assert rearm_res.status_code == 200
+        assert rearm_res.json()["rearmed_count"] >= 1
+
+        # Agora com o Telegram operando normalmente, o item é reenviado a partir da fila local (searched_count == 0) e marcado como 'sent'
+        recovery_run = client.post(f"/api/cycles/{cycle_dest_b_id}/run-now").json()
+        assert recovery_run["sent_count"] == 1
+        assert recovery_run["searched_count"] == 0
+        assert recovery_run["navigation_ms"] == 0.0
+
+        sent_queue_b = client.get(f"/api/queue?status=sent&cycle_id={cycle_dest_b_id}").json()
+        assert len(sent_queue_b) == 3
+
+        # =====================================================================
+        # 6. Comportamento adequado diante de CAPTCHA (pausa imediata + cooldown)
+        # =====================================================================
+        captcha_wall_html = """
+        <!DOCTYPE html><html><body>
+          <div id="captcha" style="width: 320px; height: 260px; display: block;">
+            <iframe src="https://www.google.com/recaptcha/api2/bframe" width="300" height="250"></iframe>
+          </div>
+        </body></html>
+        """
+        captcha_hits = 0
+
+        def mock_captcha_route(route: Route) -> None:
+            nonlocal captcha_hits
+            if "mercadolivre.com.br" in route.request.url:
+                captcha_hits += 1
+                route.fulfill(status=200, content_type="text/html; charset=utf-8", body=captcha_wall_html)
+            else:
+                route.fulfill(status=200, content_type="text/html; charset=utf-8", body="<html><body>recaptcha frame</body></html>")
+
+        scraper_service.clear_cache()
+        scraper_service._route_handler = mock_captcha_route
+
+        cycle_cap_res = client.post(
+            "/api/cycles",
+            json={
+                "name": "Ciclo Teste Cooldown CAPTCHA",
+                "query": "cadeira gamer, mesa gamer, headset gamer",
+                "source_id": "mercadolivre",
+                "search_limit": 5,
+                "max_offers_per_run": 2,
+                "interval_minutes": 5,
+                "product_delay_minutes": 0.0,
+                "destination_ids": [dest_a_id],
+                "deduplicate": True,
+            },
+        )
+        cycle_cap_id = cycle_cap_res.json()["id"]
+
+        # Ao encontrar CAPTCHA na 1ª palavra-chave ('cadeira gamer'), deve abortar IMEDIATAMENTE as demais ('mesa gamer', 'headset gamer') e ativar cooldown!
+        cap_run = client.post(f"/api/cycles/{cycle_cap_id}/run-now").json()
+        assert captcha_hits == 1  # Não tentou navegar para a 2ª nem 3ª palavra-chave!
+        assert scraper_service.is_in_cooldown()[0] is True
+        assert cap_run["status"] == "failed"
+
+        # Enquanto estiver em cooldown, uma nova chamada de busca não abre o navegador (captcha_hits continua 1)
+        cap_run_during_cooldown = client.post(f"/api/cycles/{cycle_cap_id}/run-now").json()
+        assert captcha_hits == 1
+        assert "aguarde" in (cap_run_during_cooldown.get("error_message") or "")
+    finally:
+        scraper_service._route_handler = None
+        scraper_service.clear_cooldown()
+
+
 
 
 

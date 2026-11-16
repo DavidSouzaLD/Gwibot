@@ -297,18 +297,56 @@ BLOCKED_TRACKER_PATTERNS = (
 
 
 class MercadoLivreScraper:
-    """Gerencia a coleta de produtos no Mercado Livre via Playwright (Chromium isolado)."""
+    """Gerencia a coleta de produtos no Mercado Livre via Playwright (perfil persistente Chromium)."""
 
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
-        self._concurrency_sem = asyncio.Semaphore(2)
+        # Garante exclusão mútua assíncrona no perfil persistente do Chromium
+        self._concurrency_sem = asyncio.Semaphore(1)
         self._route_handler: Any = None
         self._search_cache: dict[tuple[str, int, int], tuple[float, SearchResponse]] = {}
         self._cache_ttl_seconds: float = 20.0
+        # Controle adaptativo de pausa/cooldown quando CAPTCHA ou bloqueio é detectado
+        self._cooldown_until: float = 0.0
+        self._cooldown_reason: str | None = None
+        self._consecutive_blocks: int = 0
 
     def clear_cache(self) -> None:
         """Limpa o cache em memória de buscas."""
         self._search_cache.clear()
+
+    def is_in_cooldown(self) -> tuple[bool, float, str | None]:
+        """Retorna `(em_cooldown, segundos_restantes, motivo)` se o scraper estiver aguardando recuperação legítima."""
+        now = time.monotonic()
+        if self._cooldown_until > now:
+            return True, round(self._cooldown_until - now, 1), self._cooldown_reason
+        return False, 0.0, None
+
+    def activate_cooldown(self, seconds: float | None = None, reason: str | None = None) -> float:
+        """Ativa janela de espera adaptativa após detecção de CAPTCHA ou bloqueio, interrompendo novas requisições."""
+        self._consecutive_blocks += 1
+        if seconds is not None:
+            wait_sec = seconds
+        else:
+            # Backoff adaptativo: 60s -> 120s -> 240s -> 300s
+            wait_sec = min(300.0, 60.0 * (2 ** max(0, self._consecutive_blocks - 1)))
+        self._cooldown_until = time.monotonic() + wait_sec
+        self._cooldown_reason = reason or (
+            "Coleta temporariamente pausada após detecção de CAPTCHA/bloqueio para aguardar recuperação legítima."
+        )
+        logger.warning(
+            "Circuit Breaker ativado por %.0fs (bloqueios consecutivos=%d): %s",
+            wait_sec,
+            self._consecutive_blocks,
+            self._cooldown_reason,
+        )
+        return wait_sec
+
+    def clear_cooldown(self) -> None:
+        """Limpa o estado de cooldown (ex.: após login/verificação legítima concluída)."""
+        self._cooldown_until = 0.0
+        self._cooldown_reason = None
+        self._consecutive_blocks = 0
 
     @staticmethod
     def _fast_resource_blocker(route: Route) -> None:
@@ -572,58 +610,69 @@ class MercadoLivreScraper:
         limits: list[int],
         page_number: int = 1,
     ) -> list[SearchResponse]:
-        """Executa a coleta de uma ou mais palavras-chave reutilizando uma única instância do Chromium."""
-        storage_path = session_manager.get_storage_state_path()
-        authenticated_session_used = storage_path is not None
+        """Executa a coleta de uma ou mais palavras-chave reutilizando o perfil persistente do Chromium (`user_data_dir`)."""
+        authenticated_session_used = session_manager.is_authenticated()
         responses: list[SearchResponse] = []
+
+        # Verifica se há cooldown ativo de CAPTCHA antes de abrir o navegador
+        in_cooldown, rem_sec, cd_reason = self.is_in_cooldown()
+        if in_cooldown:
+            msg = f"{cd_reason} (aguarde {rem_sec:.0f}s para nova tentativa)"
+            logger.warning("Busca interrompida preventivamente por cooldown de CAPTCHA: %s", msg)
+            for kw, kw_limit in zip(keywords, limits):
+                responses.append(
+                    SearchResponse(
+                        status="blocked",
+                        metadata=SearchMetadata(
+                            query=kw,
+                            requested_limit=kw_limit,
+                            total_returned=0,
+                            pages_visited=0,
+                            elapsed_seconds=0.0,
+                            warning=msg,
+                            blocked_by_challenge=True,
+                            authenticated_session_used=authenticated_session_used,
+                        ),
+                        results=[],
+                    )
+                )
+            return responses
 
         try:
             with sync_playwright() as pw:
-                browser = pw.chromium.launch(
+                with session_manager.open_persistent_context(
+                    pw,
                     headless=settings.headless,
-                    args=[
-                        "--disable-blink-features=AutomationControlled",
-                        "--no-default-browser-check",
-                        "--no-first-run",
-                        "--disable-dev-shm-usage",
-                    ],
-                )
-                context_kwargs: dict[str, Any] = {
-                    "locale": settings.locale,
-                    "timezone_id": settings.timezone_id,
-                    "user_agent": settings.user_agent,
-                    "viewport": {"width": 1366, "height": 860},
-                }
-                if storage_path is not None:
-                    context_kwargs["storage_state"] = str(storage_path)
+                    viewport={"width": 1366, "height": 860},
+                ) as (_context, page):
+                    if self._route_handler is not None:
+                        page.route("**/*", self._route_handler)
+                    else:
+                        page.route("**/*", self._fast_resource_blocker)
 
-                context: BrowserContext = browser.new_context(**context_kwargs)
-                page = context.new_page()
-                if self._route_handler is not None:
-                    page.route("**/*", self._route_handler)
-                else:
-                    page.route("**/*", self._fast_resource_blocker)
+                    page.set_default_navigation_timeout(settings.navigation_timeout_ms)
+                    page.set_default_timeout(settings.selector_timeout_ms)
 
-                page.set_default_navigation_timeout(settings.navigation_timeout_ms)
-                page.set_default_timeout(settings.selector_timeout_ms)
+                    for idx, (kw, kw_limit) in enumerate(zip(keywords, limits)):
+                        if idx > 0 and self._route_handler is None:
+                            # Pequena pausa orgânica entre palavras-chave na mesma aba para evitar rate-limit
+                            page.wait_for_timeout(350)
+                        sub_res = self._scrape_keyword_on_page(
+                            page=page,
+                            query=kw,
+                            limit=kw_limit,
+                            page_number=page_number,
+                            authenticated_session_used=authenticated_session_used,
+                        )
+                        responses.append(sub_res)
 
-                for idx, (kw, kw_limit) in enumerate(zip(keywords, limits)):
-                    if idx > 0 and self._route_handler is None:
-                        # Pequena pausa orgânica entre palavras-chave na mesma aba para evitar rate-limit
-                        page.wait_for_timeout(280)
-                    sub_res = self._scrape_keyword_on_page(
-                        page=page,
-                        query=kw,
-                        limit=kw_limit,
-                        page_number=page_number,
-                        authenticated_session_used=authenticated_session_used,
-                    )
-                    responses.append(sub_res)
-                    if sub_res.status == "blocked" and sub_res.metadata.session_expired:
-                        break
+                        if sub_res.status == "blocked":
+                            # Interrompe imediatamente novas requisições na rodada ao detectar CAPTCHA ou bloqueio
+                            self.activate_cooldown(reason=sub_res.metadata.warning)
+                            break
+                        elif sub_res.status == "ok" and sub_res.results:
+                            self._consecutive_blocks = 0
 
-                context.close()
-                browser.close()
         except Exception as exc:
             logger.error("Erro no navegador durante coleta em lote: %s", exc, exc_info=True)
             if not responses:
@@ -658,8 +707,9 @@ class MercadoLivreScraper:
         page_number: int = 1,
         enrich_affiliates: bool = False,
     ) -> list[SearchResponse]:
-        """Coleta múltiplas palavras-chave em uma única sessão do navegador (ideal para Ciclos)."""
+        """Coleta múltiplas palavras-chave no perfil persistente do Chromium e persiste os produtos no banco."""
         from app.affiliates import ml_affiliate_provider
+        from app.storage import storage_service
 
         clean_kws = [k.strip() for k in keywords if k and k.strip()]
         if not clean_kws:
@@ -695,6 +745,14 @@ class MercadoLivreScraper:
                 )
             for kw, s_res in zip(missing_kws, batch_res):
                 scraped_map[kw] = s_res
+                # Persiste todos os produtos encontrados no Banco de Produtos (products_catalog)
+                if s_res.results:
+                    storage_service.upsert_catalog_products(
+                        s_res.results,
+                        source_id="mercadolivre",
+                        query_term=kw,
+                        processing_status="discovered",
+                    )
                 if use_cache and s_res.status == "ok" and s_res.results:
                     if len(self._search_cache) > 256:
                         self._search_cache.clear()
@@ -718,6 +776,12 @@ class MercadoLivreScraper:
                     resp.metadata.affiliate_ms = round((time.perf_counter() - t_aff) * 1000.0, 1)
                     resp.metadata.affiliate_converted_count = ok_c
                     resp.metadata.affiliate_failed_count = fail_c
+                    storage_service.upsert_catalog_products(
+                        resp.results,
+                        source_id="mercadolivre",
+                        query_term=resp.metadata.query,
+                        processing_status="affiliate_ready",
+                    )
 
         return ordered_responses
 

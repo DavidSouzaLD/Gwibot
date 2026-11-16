@@ -1,7 +1,10 @@
-"""Motor de agendamento de cadência fixa e pipeline otimizado de Ciclos Automatizados (Campaigns).
+"""Motor de agendamento de cadência fixa e pipeline orientado a Banco de Produtos e Fila Persistente.
 
-Fluxo em etapas separadas e instrumentadas:
-Cycle -> Search (Playwright Batch) -> Filter & O(1) Dedup -> Affiliate Link -> Async Output Dispatch
+Novo Fluxo:
+Busca -> Banco de Produtos (products_catalog) -> Deduplicação -> Fila de Pendentes (offer_queue) -> Link Afiliado -> Output
+- O scheduler prioriza o processamento de ofertas já armazenadas na fila/catálogo antes de abrir o navegador.
+- Garante que nenhuma oferta seja publicada duas vezes no mesmo destino.
+- Reprocessa automaticamente ofertas pendentes ou com falha transitória de envio.
 """
 from __future__ import annotations
 
@@ -51,13 +54,12 @@ def _parse_iso_safe(iso_str: str | None) -> datetime | None:
 
 
 class CycleScheduler:
-    """Coordena a execução recorrente em cadência fixa (start-to-start), filtros, deduplicação O(1) e envio."""
+    """Coordena a execução recorrente em cadência fixa, fila persistente de pendentes, deduplicação por destino e envio."""
 
     def __init__(self) -> None:
         self._running_locks: set[str] = set()
         self._scheduled_tasks: dict[str, asyncio.Task[None]] = {}
         self._scheduler_active = False
-        # Permite que múltiplos ciclos independentes executem em paralelo respeitando limite seguro de recursos
         self._cycle_concurrency_sem = asyncio.Semaphore(3)
 
     def is_cycle_executing_now(self, cycle_id: str) -> bool:
@@ -81,10 +83,7 @@ class CycleScheduler:
         interval_minutes: int,
         now_dt: datetime | None = None,
     ) -> datetime:
-        """Calcula o próximo horário previsto ancorado na grade de início (start-to-start).
-
-        Impede que uma execução lenta desloque indefinidamente a grade das próximas execuções.
-        """
+        """Calcula o próximo horário previsto ancorado na grade de início (start-to-start)."""
         current_now = now_dt or _now_dt()
         step = timedelta(minutes=max(1, interval_minutes))
         next_slot = scheduled_dt + step
@@ -140,12 +139,12 @@ class CycleScheduler:
 
     @staticmethod
     def build_dedup_key(source_id: str, item: ProductItem) -> str:
-        """Gera a chave canônica de deduplicação do produto para evitar repetições entre ciclos."""
-        identifier = (item.id or item.url or item.name or "").strip().lower()
-        return f"{source_id}:{identifier}"
+        """Gera a chave canônica de deduplicação do produto baseada no ID do Mercado Livre."""
+        _, dedup_key = storage_service.canonical_product_identity(source_id, item)
+        return dedup_key
 
     # -----------------------------------------------------------------
-    # Execução Completa de um Ciclo em Etapas Instrumentadas
+    # Novo Fluxo: Busca -> Banco de Produtos -> Deduplicação -> Fila -> Link Afiliado -> Output
     # -----------------------------------------------------------------
 
     async def execute_cycle_once(
@@ -153,10 +152,7 @@ class CycleScheduler:
         cycle_id: str,
         scheduled_at: str | None = None,
     ) -> tuple[bool, CycleRunLog | None, str]:
-        """Executa o pipeline completo de um ciclo uma única vez.
-
-        Impede execuções simultâneas do mesmo ciclo e registra telemetria detalhada por etapa.
-        """
+        """Executa o pipeline completo priorizando ofertas pendentes já coletadas no banco."""
         cycle = storage_service.get_cycle(cycle_id)
         if not cycle:
             return False, None, "Ciclo não encontrado."
@@ -217,6 +213,13 @@ class CycleScheduler:
                 aff_provider = affiliate_registry.get(cycle.source_id)
                 aff_config = storage_service.get_affiliate_config(cycle.source_id)
 
+                destinations = [
+                    d
+                    for d_id in cycle.destination_ids
+                    if (d := storage_service.get_destination(d_id)) is not None and d.enabled
+                ]
+                active_dest_ids = [d.id for d in destinations if d.id]
+
                 candidates_to_send: list[tuple[str, ProductItem]] = []
                 seen_in_batch: set[str] = set()
                 kw_warnings: list[str] = []
@@ -226,14 +229,36 @@ class CycleScheduler:
                 total_affiliate_ok = 0
                 total_affiliate_fail = 0
 
+                # ETAPA 0: Prioriza ofertas já armazenadas na Fila de Pendentes / Banco de Produtos
+                t_q_start = time.perf_counter()
+                pending_stored = storage_service.fetch_pending_candidates_for_cycle(
+                    cycle=cycle,
+                    destinations=destinations,
+                    passes_filters_fn=self.passes_filters,
+                )
+                for dk, p_item in pending_stored:
+                    if dk not in seen_in_batch:
+                        seen_in_batch.add(dk)
+                        candidates_to_send.append((dk, p_item))
+                proc_ms_acc += (time.perf_counter() - t_q_start) * 1000.0
+
+                if candidates_to_send:
+                    logger.info(
+                        "Ciclo '%s' | Recuperados %d produtos pendentes do banco local antes da busca.",
+                        cycle.name,
+                        len(candidates_to_send),
+                    )
+
                 current_page = getattr(cycle, "last_page_offset", 1) or 1
-                max_pages_to_scan = 4
+                # Paginação incremental conservadora: no máximo 2 páginas quando a fila local precisa de novos itens
+                max_pages_to_scan = 2
                 pages_scanned = 0
 
+                # Só realiza nova busca no navegador se a fila local tiver menos produtos que `max_offers_per_run`
                 while len(candidates_to_send) < cycle.max_offers_per_run and pages_scanned < max_pages_to_scan:
                     pages_scanned += 1
                     logger.info(
-                        "Ciclo '%s' | Varredura de página %d (cursor=%d) | candidatos atuais=%d/%d",
+                        "Ciclo '%s' | Busca incremental página %d (cursor=%d) | pendentes atuais=%d/%d",
                         cycle.name,
                         pages_scanned,
                         current_page,
@@ -241,7 +266,7 @@ class CycleScheduler:
                         cycle.max_offers_per_run,
                     )
 
-                    # ETAPA 1: Coleta em lote (todas as palavras-chave na mesma sessão do navegador, sem enriquecer duplicado)
+                    # ETAPA 1: Busca no Mercado Livre (reutilizando perfil persistente e salvando em products_catalog)
                     t_search_stage = time.perf_counter()
                     batch_responses = await source.search_keywords_batch(
                         keywords=keywords,
@@ -285,7 +310,7 @@ class CycleScheduler:
                         current_page = 1
                         break
 
-                    # ETAPA 2: Processamento (intercalação round-robin + filtros de preço/desconto/avaliação)
+                    # ETAPA 2: Banco de Produtos & Filtros
                     t_proc_start = time.perf_counter()
                     raw_products_page: list[ProductItem] = []
                     max_bucket_len = max((len(b) for b in per_kw_buckets), default=0)
@@ -306,17 +331,29 @@ class CycleScheduler:
                         current_page = 1
                         break
 
-                    filtered_page = [p for p in raw_products_page if self.passes_filters(p, cycle.filters)]
+                    filtered_page: list[ProductItem] = []
+                    for p in raw_products_page:
+                        prod_id, _ = storage_service.canonical_product_identity(cycle.source_id, p)
+                        if not p.id:
+                            p.id = prod_id
+                        if self.passes_filters(p, cycle.filters):
+                            filtered_page.append(p)
+                        else:
+                            storage_service.update_catalog_product_status(
+                                prod_id,
+                                processing_status="filtered_out",
+                            )
+
                     total_filtered += len(filtered_page)
                     proc_ms_acc += (time.perf_counter() - t_proc_start) * 1000.0
 
-                    # ETAPA 3: Geração de Links de Afiliado (apenas para produtos aprovados nos filtros, sem repetição)
+                    # ETAPA 3: Link Afiliado (para produtos aprovados nos filtros)
                     t_aff_start = time.perf_counter()
                     if filtered_page:
                         await aff_provider.enrich_products(filtered_page, config=aff_config)
                     aff_ms_acc += (time.perf_counter() - t_aff_start) * 1000.0
 
-                    # ETAPA 4: Deduplicação em lote O(1) via cache em memória
+                    # ETAPA 4: Deduplicação por ID/Destino & Enfileiramento na Fila de Pendentes
                     t_dedup_start = time.perf_counter()
                     eligible_with_keys: list[tuple[str, ProductItem]] = []
                     for item in filtered_page:
@@ -336,7 +373,8 @@ class CycleScheduler:
 
                     if cycle.deduplicate and eligible_with_keys:
                         unsent_keys = storage_service.filter_unsent_dedup_keys(
-                            [dk for dk, _ in eligible_with_keys]
+                            [dk for dk, _ in eligible_with_keys],
+                            destination_ids=active_dest_ids if active_dest_ids else None,
                         )
                         for dk, item in eligible_with_keys:
                             if dk in unsent_keys:
@@ -347,13 +385,42 @@ class CycleScheduler:
                     proc_ms_acc += (time.perf_counter() - t_dedup_start) * 1000.0
 
                     if any_blocked:
-                        # Preserva os produtos já coletados das palavras-chave bem-sucedidas e reseta cursor para página 1
                         current_page = 1
                         break
 
                     current_page += 1
-                    if current_page > 10:
+                    if current_page > 6:
                         current_page = 1
+
+                # Garante que candidatos recuperados do banco sem link afiliado recebam conversão antes do envio
+                items_needing_aff = [
+                    item
+                    for _, item in candidates_to_send
+                    if not item.affiliate_url or item.affiliate_status != "generated"
+                ]
+                if items_needing_aff:
+                    t_aff_extra = time.perf_counter()
+                    _, ok_extra, fail_extra = await aff_provider.enrich_products(items_needing_aff, config=aff_config)
+                    aff_ms_acc += (time.perf_counter() - t_aff_extra) * 1000.0
+                    total_affiliate_ok += ok_extra
+                    total_affiliate_fail += fail_extra
+                    if cycle.filters.require_affiliate_link:
+                        candidates_to_send = [
+                            (dk, it)
+                            for dk, it in candidates_to_send
+                            if it.affiliate_status == "generated" and it.affiliate_url
+                        ]
+
+                # Persiste TODOS os candidatos inéditos na Fila de Pendentes (offer_queue)
+                # Os que excederem `max_offers_per_run` permanecem na fila para a próxima execução sem nova busca!
+                if candidates_to_send:
+                    storage_service.enqueue_pending_offers(
+                        cycle_id=cycle.id,
+                        cycle_name=cycle.name,
+                        source_id=cycle.source_id,
+                        candidates=candidates_to_send,
+                        destinations=destinations,
+                    )
 
                 run_log.searched_count = total_searched
                 run_log.filtered_count = total_filtered
@@ -394,23 +461,19 @@ class CycleScheduler:
                     return False, run_log, err_msg
 
                 selected_offers = candidates_to_send[: cycle.max_offers_per_run]
+                remaining_queued = max(0, len(candidates_to_send) - len(selected_offers))
                 logger.info(
-                    "Ciclo '%s' | Deduplication & Offset: %d inéditos em %d páginas -> %d selecionados (próximo offset=%d).",
+                    "Ciclo '%s' | Fila & Deduplicação: %d disponíveis (%d buscados em %d pág.) -> %d selecionados para envio, %d mantidos na fila.",
                     cycle.name,
                     len(candidates_to_send),
+                    total_searched,
                     pages_scanned,
                     len(selected_offers),
-                    current_page,
+                    remaining_queued,
                 )
 
-                # ETAPA 5: OUTPUT DISPATCH (Envio paralelo por destino + persistência SQLite em lote)
+                # ETAPA 5: OUTPUT DISPATCH (Garantia de não publicar 2x no mesmo destino + controle de tentativas)
                 t_disp_start = time.perf_counter()
-                destinations = [
-                    d
-                    for d_id in cycle.destination_ids
-                    if (d := storage_service.get_destination(d_id)) is not None and d.enabled
-                ]
-
                 sent_count = 0
                 failed_send_count = 0
                 last_send_error: str | None = None
@@ -421,26 +484,42 @@ class CycleScheduler:
                     logger.warning("Ciclo '%s' | %s", cycle.name, last_send_error)
 
                 for idx, (dedup_key, item) in enumerate(selected_offers):
+                    prod_id, _ = storage_service.canonical_product_identity(cycle.source_id, item)
                     if destinations:
+                        # Filtra destinos para os quais este produto AINDA NÃO foi enviado
+                        target_dests_for_item = [
+                            dest
+                            for dest in destinations
+                            if not (
+                                cycle.deduplicate
+                                and dest.id
+                                and storage_service.is_offer_already_sent(dedup_key, dest.id)
+                            )
+                        ]
+                        if not target_dests_for_item:
+                            continue
+
                         deliveries = await asyncio.gather(
                             *(
                                 output_registry.get(dest.output_type).send_offer(
                                     item, dest, cycle_name=cycle.name
                                 )
-                                for dest in destinations
+                                for dest in target_dests_for_item
                             )
                         )
                         now_sent_iso = _now_iso()
-                        for dest, delivery in zip(destinations, deliveries):
+                        for dest, delivery in zip(target_dests_for_item, deliveries):
+                            dest_id_str = dest.id or "unknown"
+                            err_detail = delivery.error or (None if delivery.success else delivery.message)
                             offer_record = SentOfferRecord(
                                 id=f"offer_{uuid.uuid4().hex[:10]}",
                                 dedup_key=dedup_key,
                                 cycle_id=cycle.id,
                                 cycle_name=cycle.name,
                                 source_id=cycle.source_id,
-                                destination_id=dest.id or "unknown",
+                                destination_id=dest_id_str,
                                 destination_name=dest.name,
-                                product_id=item.id,
+                                product_id=prod_id,
                                 product_name=item.name or "Sem título",
                                 original_price=item.original_price,
                                 promotional_price=item.promotional_price,
@@ -450,16 +529,25 @@ class CycleScheduler:
                                 affiliate_url=item.affiliate_url or item.url or "",
                                 image_url=item.image_url,
                                 status="sent" if delivery.success else "failed",
-                                error_message=delivery.error,
+                                error_message=err_detail,
                                 sent_at=now_sent_iso,
                             )
                             records_to_persist.append(offer_record)
+
+                            storage_service.mark_queue_delivery_outcome(
+                                product_id=prod_id,
+                                dedup_key=dedup_key,
+                                destination_id=dest_id_str,
+                                success=delivery.success,
+                                affiliate_url=item.affiliate_url,
+                                error=err_detail,
+                            )
 
                             if delivery.success:
                                 sent_count += 1
                             else:
                                 failed_send_count += 1
-                                last_send_error = delivery.error
+                                last_send_error = err_detail
 
                     if (
                         idx < len(selected_offers) - 1
@@ -533,7 +621,7 @@ class CycleScheduler:
                 logger.info(
                     "Ciclo '%s' concluído em %.2fs (atraso=%.2fs, gargalo=%s) | "
                     "nav=%.0fms extr=%.0fms proc=%.0fms afil=%.0fms envio=%.0fms | "
-                    "buscados=%d filtrados=%d afiliados=%d enviados=%d",
+                    "buscados=%d filtrados=%d fila=%d enviados=%d",
                     cycle.name,
                     run_log.duration_seconds,
                     run_log.schedule_delay_seconds,
@@ -545,7 +633,7 @@ class CycleScheduler:
                     run_log.dispatch_ms,
                     run_log.searched_count,
                     run_log.filtered_count,
-                    run_log.affiliate_ok_count,
+                    run_log.deduplicated_new_count,
                     run_log.sent_count,
                 )
                 return True, run_log, "Execução concluída com sucesso."
@@ -589,11 +677,7 @@ class CycleScheduler:
     # -----------------------------------------------------------------
 
     async def _cycle_loop(self, cycle_id: str, run_immediately: bool = True) -> None:
-        """Loop assíncrono de execução periódica ancorado no horário de início (start-to-start).
-
-        Diferencia o intervalo entre inícios (`interval_minutes`) da duração da execução (`duration_seconds`),
-        subtraindo o tempo gasto na coleta para manter intervalos previsíveis (ex.: 1 minuto exato).
-        """
+        """Loop assíncrono de execução periódica ancorado no horário de início (start-to-start)."""
         cycle = storage_service.get_cycle(cycle_id)
         if not cycle:
             return
@@ -608,7 +692,6 @@ class CycleScheduler:
             if not cycle or cycle.state != "running":
                 break
 
-            # Calcula próximo slot na grade fixa (start-to-start) sem acumular deriva da duração anterior
             scheduled_dt = self.compute_next_scheduled_slot(
                 scheduled_dt=scheduled_dt,
                 interval_minutes=cycle.interval_minutes,

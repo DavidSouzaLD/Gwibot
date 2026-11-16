@@ -21,6 +21,7 @@ from app.models import (
     AffiliateConvertRequest,
     AffiliateConvertResponse,
     AuthStatusResponse,
+    CatalogProductRecord,
     CycleCreateRequest,
     CycleModel,
     CycleRunLog,
@@ -31,6 +32,7 @@ from app.models import (
     PLATFORM_MAX_CHARS,
     PlatformTemplateModel,
     ProductItem,
+    QueuedOfferRecord,
     SearchResponse,
     SentOfferRecord,
     TelegramTokenVerifyRequest,
@@ -629,3 +631,36 @@ async def clear_sent_offers_history() -> dict[str, str]:
     """Limpa o histórico de ofertas enviadas e execuções de ciclos."""
     storage_service.clear_history()
     return {"status": "ok", "message": "Histórico limpo com sucesso."}
+
+
+# =====================================================================
+# Banco de Produtos e Fila Persistente de Pendentes (/api/products, /api/queue)
+# =====================================================================
+
+@app.get("/api/products", response_model=list[CatalogProductRecord], tags=["Catalog"])
+async def list_catalog_products_endpoint(
+    limit: int = Query(default=100, ge=1, le=500),
+    publication_status: Optional[str] = Query(default=None),
+) -> list[CatalogProductRecord]:
+    """Lista os produtos catalogados no banco local (identificados por ID único do Mercado Livre)."""
+    return storage_service.list_catalog_products(limit=limit, publication_status=publication_status)
+
+
+@app.get("/api/queue", response_model=list[QueuedOfferRecord], tags=["Queue"])
+async def list_offer_queue_endpoint(
+    limit: int = Query(default=100, ge=1, le=500),
+    status: Optional[str] = Query(default=None),
+    cycle_id: Optional[str] = Query(default=None),
+) -> list[QueuedOfferRecord]:
+    """Lista a fila persistente de ofertas pendentes, enviadas ou aguardando retentativa."""
+    return storage_service.list_offer_queue(limit=limit, status=status, cycle_id=cycle_id)
+
+
+@app.post("/api/queue/retry", tags=["Queue"])
+async def retry_failed_queue_items_endpoint(
+    cycle_id: Optional[str] = Query(default=None),
+) -> dict[str, Any]:
+    """Reagenda imediatamente itens com falha/aguardando retentativa na fila persistente."""
+    rearmed = storage_service.retry_failed_queue_items(cycle_id=cycle_id)
+    return {"status": "ok", "rearmed_count": rearmed}
+
