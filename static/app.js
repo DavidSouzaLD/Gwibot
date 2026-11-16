@@ -1150,7 +1150,7 @@
         if (!cycleQueryInput || !cycleQueryTags) return;
         const keywords = parseKeywords(cycleQueryInput.value);
         if (!keywords.length) {
-            cycleQueryTags.innerHTML = `<span class="null-pill">Digite palavras-chave acima para visualizar as tags...</span>`;
+            cycleQueryTags.innerHTML = `<span class="null-pill">Vazio = busca geral (produtos/ofertas em geral, sem nicho específico).</span>`;
             return;
         }
         cycleQueryTags.innerHTML = keywords
@@ -1280,14 +1280,6 @@
         e.preventDefault();
         const editingId = editingCycleIdInput ? editingCycleIdInput.value.trim() : "";
         const keywords = parseKeywords(document.getElementById("cycleQuery").value);
-        if (!keywords.length) {
-            showAuthFeedback(
-                "Palavras-chave inválidas:",
-                "Informe pelo menos uma palavra-chave válida no campo Nicho / palavras-chave.",
-                "error"
-            );
-            return;
-        }
 
         const intervalMinutes = parseInt(document.getElementById("cycleInterval").value, 10) || 0;
         const maxOffersPerRun = parseInt(document.getElementById("cycleMaxOffers").value, 10) || 1;
@@ -1404,9 +1396,10 @@
                     .filter(Boolean)
                     .join(" | ") || "Sem filtros";
 
-                const kwTagsHtml = parseKeywords(c.query)
-                    .map((kw) => `<span class="keyword-tag-sm">${escapeHtml(kw)}</span>`)
-                    .join("");
+                const parsedKws = parseKeywords(c.query);
+                const kwTagsHtml = parsedKws.length
+                    ? parsedKws.map((kw) => `<span class="keyword-tag-sm">${escapeHtml(kw)}</span>`).join("")
+                    : `<span class="keyword-tag-sm">Geral (Sem nicho)</span>`;
 
                 const delayValMin = c.product_delay_minutes ?? 0;
                 const delaySec = Math.round(delayValMin * 60);
@@ -1549,7 +1542,7 @@
                             <div style="font-size: 11px; color: var(--text-muted);">Prev: ${formatDateShort(r.scheduled_at || r.started_at)}</div>
                             <div>Início: <strong>${formatDateShort(r.started_at)}</strong></div>
                         </td>
-                        <td><strong>${escapeHtml(r.cycle_name)}</strong> (${escapeHtml(r.query)})</td>
+                        <td><strong>${escapeHtml(r.cycle_name)}</strong> (${escapeHtml(r.query || "Geral")})</td>
                         <td><span class="status-pill ${escapeHtml(r.status)}">${escapeHtml(r.status)}</span></td>
                         <td><strong>${durStr}</strong> &bull; ${delayStr}</td>
                         <td>

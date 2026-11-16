@@ -20,10 +20,11 @@ if %ERRORLEVEL% neq 0 (
     exit /b 1
 )
 
-:: Cria o ambiente virtual (.venv) se nao existir
-if not exist ".venv\Scripts\python.exe" (
+:: Cria ou recria o ambiente virtual (.venv) se nao existir ou vier de outro PC
+.\.venv\Scripts\python.exe --version >nul 2>nul
+if %ERRORLEVEL% neq 0 (
     echo [1/4] Criando ambiente virtual Python ^(.venv^)...
-    python -m venv .venv
+    python -m venv --clear .venv
     if !ERRORLEVEL! neq 0 (
         echo [ERRO] Falha ao criar o ambiente virtual.
         pause
@@ -35,7 +36,7 @@ if not exist ".venv\Scripts\python.exe" (
 
 :: Instala ou atualiza as dependencias
 echo [2/4] Verificando dependencias Python ^(requirements.txt^)...
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt --quiet
+.\.venv\Scripts\python.exe -m pip install --prefer-binary -r requirements.txt --quiet
 if %ERRORLEVEL% neq 0 (
     echo [ERRO] Falha ao instalar dependencias do requirements.txt.
     pause
@@ -47,6 +48,11 @@ set "PLAYWRIGHT_BROWSERS_PATH=%~dp0.playwright-browsers"
 if not exist ".playwright-browsers" (
     echo [3/4] Instalando navegador Chromium isolado do Playwright...
     .\.venv\Scripts\python.exe -m playwright install chromium
+    if !ERRORLEVEL! neq 0 (
+        echo [ERRO] Falha ao instalar o navegador Chromium do Playwright.
+        pause
+        exit /b 1
+    )
 ) else (
     echo [3/4] Navegador Chromium isolado pronto em .playwright-browsers.
 )

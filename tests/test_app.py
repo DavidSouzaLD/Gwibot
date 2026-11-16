@@ -1711,6 +1711,114 @@ def test_sidebar_reset_button_confirmation_modal_and_full_system_reset() -> None
     assert auth_after["state"] == "logged_out"
 
 
+def test_cycle_long_query_and_empty_general_query(monkeypatch) -> None:
+    """Valida remoção do limite de 500 caracteres e suporte a ciclo sem nicho (query vazia = busca geral)."""
+    from app.scraper import MercadoLivreScraper, scraper_service
+    from app.affiliates import ml_affiliate_provider
+
+    # 1. URL builder para busca geral (vazia)
+    assert MercadoLivreScraper.build_search_url("", page_number=1) == "https://www.mercadolivre.com.br/ofertas"
+    assert MercadoLivreScraper.build_search_url("   ", page_number=2) == "https://www.mercadolivre.com.br/ofertas?page=2"
+
+    # 2. Cria ciclo com mais de 500 caracteres em `query`
+    long_terms = [f"produto_nicho_especifico_{i:02d}" for i in range(30)]
+    long_query = ", ".join(long_terms)
+    assert len(long_query) > 500
+
+    dest_res = client.post(
+        "/api/outputs",
+        json={
+            "name": "Destino Teste Geral",
+            "output_type": "telegram",
+            "enabled": True,
+            "config": {"bot_token": "999999:TOKEN_GERAL", "chat_id": "-100999999"},
+        },
+    )
+    assert dest_res.status_code == 200
+    dest_id = dest_res.json()["id"]
+
+    long_cycle_res = client.post(
+        "/api/cycles",
+        json={
+            "name": "Ciclo Query Longa",
+            "query": long_query,
+            "source_id": "mercadolivre",
+            "search_limit": 5,
+            "max_offers_per_run": 1,
+            "interval_minutes": 10,
+            "destination_ids": [dest_id],
+        },
+    )
+    assert long_cycle_res.status_code == 200
+    assert len(long_cycle_res.json()["query"]) > 500
+
+    # 3. Cria ciclo com query vazia (campanha sem nicho específico)
+    empty_cycle_res = client.post(
+        "/api/cycles",
+        json={
+            "name": "Ciclo Produtos Em Geral",
+            "query": "   ",
+            "source_id": "mercadolivre",
+            "search_limit": 5,
+            "max_offers_per_run": 1,
+            "interval_minutes": 10,
+            "destination_ids": [dest_id],
+            "filters": {"require_affiliate_link": False},
+        },
+    )
+    assert empty_cycle_res.status_code == 200
+    empty_cycle = empty_cycle_res.json()
+    assert empty_cycle["query"] == ""
+
+    # 4. Executa o ciclo vazio e garante que acessa /ofertas e publica o produto
+    visited_urls: list[str] = []
+    sent_messages: list[str] = []
+
+    html_ofertas = """
+    <html><body>
+        <div class="poly-card">
+            <img class="poly-component__picture" src="https://http2.mlstatic.com/D_NQ_NP_MLB880001.webp" />
+            <a class="poly-component__title" href="https://www.mercadolivre.com.br/oferta-geral-1/p/MLB880001">Oferta Geral Imperdível</a>
+            <div class="poly-price__current">
+                <span class="andes-money-amount"><span class="andes-money-amount__fraction">199</span></span>
+            </div>
+        </div>
+    </body></html>
+    """
+
+    def route_handler(route):
+        url = route.request.url
+        visited_urls.append(url)
+        route.fulfill(status=200, content_type="text/html; charset=utf-8", body=html_ofertas)
+
+    def mock_tg(request: httpx.Request) -> httpx.Response:
+        sent_messages.append(request.content.decode("utf-8", errors="ignore"))
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 777}})
+
+    output_registry.register(TelegramOutputSource(transport=httpx.MockTransport(mock_tg)))
+
+    async def fake_enrich(products, config=None):
+        return products, 0, 0
+
+    monkeypatch.setattr(ml_affiliate_provider, "enrich_products", fake_enrich)
+
+    scraper_service.clear_cooldown()
+    scraper_service._route_handler = route_handler
+    try:
+        run_res = client.post(f"/api/cycles/{empty_cycle['id']}/run-now")
+        assert run_res.status_code == 200
+        run_data = run_res.json()
+        assert run_data["status"] == "completed"
+        assert run_data["sent_count"] == 1
+        assert any("/ofertas" in u for u in visited_urls)
+        assert len(sent_messages) == 1
+        assert "Oferta Geral Imperd" in sent_messages[0]
+    finally:
+        scraper_service._route_handler = None
+        output_registry.register(TelegramOutputSource())
+
+
+
 
 
 

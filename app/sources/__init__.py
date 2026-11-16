@@ -77,6 +77,8 @@ class MercadoLivreSearchSource(SearchSource):
         enrich_affiliates: bool = False,
     ) -> list[SearchResponse]:
         clean_kws = [k.strip() for k in keywords if k and k.strip()] or parse_keywords(",".join(keywords))
+        if not clean_kws and keywords:
+            clean_kws = [""]
         return await scraper_service.search_keywords_batch(
             keywords=clean_kws,
             limit_per_keyword=limit_per_keyword,

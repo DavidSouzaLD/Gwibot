@@ -366,8 +366,13 @@ class MercadoLivreScraper:
 
     @staticmethod
     def build_search_url(query: str, page_number: int = 1) -> str:
-        """Monta a URL de busca no Mercado Livre a partir de uma palavra-chave com suporte a offset de página."""
+        """Monta a URL de busca no Mercado Livre a partir de uma palavra-chave ou busca geral (vazia) com suporte a página."""
         clean_term = re.sub(r"[,;\r\n]+", " ", query).strip()
+        if not clean_term:
+            if page_number > 1:
+                return f"{settings.ml_base_url}/ofertas?page={page_number}"
+            return f"{settings.ml_base_url}/ofertas"
+
         normalized = "-".join(clean_term.split())
         encoded_slug = quote_plus(normalized)
         encoded_query = quote_plus(clean_term)
@@ -713,7 +718,10 @@ class MercadoLivreScraper:
 
         clean_kws = [k.strip() for k in keywords if k and k.strip()]
         if not clean_kws:
-            return []
+            if any(isinstance(k, str) and not k.strip() for k in keywords):
+                clean_kws = [""]
+            else:
+                return []
 
         now = time.monotonic()
         use_cache = self._route_handler is None

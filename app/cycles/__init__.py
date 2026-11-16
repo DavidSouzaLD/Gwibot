@@ -208,7 +208,7 @@ class CycleScheduler:
 
                 keywords = parse_keywords(cycle.query)
                 if not keywords:
-                    keywords = [cycle.query.strip()]
+                    keywords = [""]
 
                 aff_provider = affiliate_registry.get(cycle.source_id)
                 aff_config = storage_service.get_affiliate_config(cycle.source_id)
@@ -282,18 +282,19 @@ class CycleScheduler:
                     page_ext_ms = 0.0
 
                     for kw, kw_res in zip(keywords, batch_responses):
+                        kw_label = kw or "Geral"
                         page_nav_ms += kw_res.metadata.navigation_ms
                         page_ext_ms += kw_res.metadata.extraction_ms
 
                         if kw_res.status == "blocked":
                             any_blocked = True
                             if kw_res.metadata.warning:
-                                kw_warnings.append(f"[{kw}] {kw_res.metadata.warning}")
+                                kw_warnings.append(f"[{kw_label}] {kw_res.metadata.warning}")
                             continue
 
                         if not kw_res.results:
-                            warn = kw_res.metadata.warning or f"Sem resultados para '{kw}' na página {current_page}."
-                            kw_warnings.append(f"[{kw}] {warn}")
+                            warn = kw_res.metadata.warning or f"Sem resultados para '{kw_label}' na página {current_page}."
+                            kw_warnings.append(f"[{kw_label}] {warn}")
                             continue
 
                         page_had_results = True

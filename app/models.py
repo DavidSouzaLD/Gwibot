@@ -386,10 +386,8 @@ class CycleCreateRequest(BaseModel):
 
     name: str = Field(..., min_length=1, max_length=100, description="Nome da campanha/ciclo")
     query: str = Field(
-        ...,
-        min_length=1,
-        max_length=500,
-        description="Um ou mais nichos/palavras-chave separados por vírgula ou quebra de linha",
+        default="",
+        description="Um ou mais nichos/palavras-chave separados por vírgula ou quebra de linha (vazio = busca geral)",
     )
     source_id: str = Field(default="mercadolivre", description="Fonte de pesquisa ('mercadolivre', 'shopee', 'amazon')")
     search_limit: int = Field(default=20, ge=1, le=120, description="Quantidade de produtos a buscar por palavra-chave")
@@ -416,9 +414,7 @@ class CycleCreateRequest(BaseModel):
         from app.parser import parse_keywords
 
         keywords = parse_keywords(self.query)
-        if not keywords:
-            raise ValueError("Informe ao menos uma palavra-chave válida.")
-        self.query = ", ".join(keywords)
+        self.query = ", ".join(keywords) if keywords else ""
 
         if self.product_delay_minutes >= self.interval_minutes:
             raise ValueError(
