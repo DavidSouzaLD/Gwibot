@@ -57,7 +57,11 @@ if not exist ".playwright-browsers" (
     echo [3/4] Navegador Chromium isolado pronto em .playwright-browsers.
 )
 
-echo [4/4] Iniciando servidor FastAPI em http://127.0.0.1:8000 ...
+echo [4/4] Iniciando servidor FastAPI acessivel na rede local ^(0.0.0.0:8000^)...
+echo       Local: http://127.0.0.1:8000
+for /f "usebackq delims=" %%I in (`powershell -NoProfile -Command "Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -ne '127.0.0.1' -and $_.IPAddress -notlike '169.254.*' -and $_.PrefixOrigin -ne 'WellKnown' } | Select-Object -ExpandProperty IPAddress -Unique"`) do (
+    echo       Rede:  http://%%I:8000
+)
 echo.
 echo Pressione CTRL+C para encerrar o servidor.
 echo.
@@ -65,5 +69,5 @@ echo.
 :: Abre o navegador padrao apos 2 segundos em background
 start "" cmd /c "timeout /t 2 /nobreak >nul && start http://127.0.0.1:8000"
 
-.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 pause

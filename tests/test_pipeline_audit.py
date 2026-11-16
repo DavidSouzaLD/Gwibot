@@ -364,3 +364,182 @@ def test_multicycle_stress_recovery_and_restart_isolation(tmp_path: Path, monkey
     finally:
         source_registry.register(orig_ml_source)
         output_registry.register(orig_tg)
+
+
+def test_random_search_ignores_previous_niches_and_varies_across_cycles(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Garante que busca sem nicho (query='') ignora histórico de nichos anteriores, varia entre ciclos e preserva filtros."""
+    isolated_db = tmp_path / "random_isolation.db"
+    test_storage = StorageService(db_path=isolated_db)
+
+    import app.cycles as cycles_mod
+    import app.outputs as outputs_mod
+    import app.affiliates as affiliates_mod
+
+    monkeypatch.setattr(cycles_mod, "storage_service", test_storage)
+    monkeypatch.setattr(outputs_mod, "storage_service", test_storage)
+    monkeypatch.setattr(affiliates_mod, "storage_service", test_storage)
+
+    test_storage.save_affiliate_config(
+        AffiliateConfigModel(
+            provider_id="mercadolivre",
+            enabled=True,
+            matt_word="randword",
+            matt_tool="123456",
+        )
+    )
+    dest = test_storage.save_destination(
+        OutputDestinationConfig(
+            id="dest_rand",
+            name="Canal Aleatório",
+            output_type="telegram",
+            enabled=True,
+            config={"bot_token": "333333:TOKEN_RAND", "chat_id": "-100333"},
+        )
+    )
+
+    # 1. Popula products_catalog com produtos NÃO publicados de pesquisas nichadas anteriores
+    niche_items = [
+        ProductItem(
+            id="MLB777001",
+            name="Placa de Video RTX 4090 Nicho Antigo",
+            url="https://www.mercadolivre.com.br/p/MLB777001",
+            promotional_price=9999.0,
+            discount_percentage=25,
+            rating=4.9,
+        ),
+        ProductItem(
+            id="MLB777002",
+            name="iPhone 15 Pro Max Nicho Antigo",
+            url="https://www.mercadolivre.com.br/p/MLB777002",
+            promotional_price=7999.0,
+            discount_percentage=20,
+            rating=4.8,
+        ),
+    ]
+    test_storage.upsert_catalog_products(niche_items, source_id="mercadolivre", query_term="placa de video, iphone")
+
+    from app.scraper import MercadoLivreScraper
+    assert MercadoLivreScraper.build_search_url("", page_number=1, general_route="lightning") == "https://www.mercadolivre.com.br/ofertas?promotion_type=lightning"
+    assert MercadoLivreScraper.build_search_url("", page_number=3, general_route="deal_of_the_day") == "https://www.mercadolivre.com.br/ofertas?promotion_type=deal_of_the_day&page=3"
+    assert MercadoLivreScraper.build_search_url("", page_number=2, general_route="top_discount") == "https://www.mercadolivre.com.br/ofertas?discount=20-100&page=2"
+
+    search_calls: list[tuple[str, int]] = []
+
+    class RandomAndNicheMockSource(SearchSource):
+        source_id = "mercadolivre"
+        display_name = "Mock Random & Niche"
+        supported = True
+
+        async def search(self, query: str, limit: int, page_number: int = 1, enrich_affiliates: bool = True) -> SearchResponse:
+            search_calls.append((query, page_number))
+            if query == "":
+                # Ofertas gerais da página sorteada + 1 item barato que deve ser descartado pelo filtro
+                items = [
+                    ProductItem(
+                        id=f"MLBRAND{page_number}01",
+                        name=f"Oferta Geral Aleatória P{page_number}-A",
+                        url=f"https://www.mercadolivre.com.br/p/MLBRAND{page_number}01",
+                        promotional_price=250.0,
+                        discount_percentage=25,
+                        rating=4.7,
+                    ),
+                    ProductItem(
+                        id=f"MLBRAND{page_number}02",
+                        name=f"Oferta Geral Aleatória P{page_number}-B",
+                        url=f"https://www.mercadolivre.com.br/p/MLBRAND{page_number}02",
+                        promotional_price=320.0,
+                        discount_percentage=30,
+                        rating=4.8,
+                    ),
+                    ProductItem(
+                        id=f"MLBRAND{page_number}99",
+                        name=f"Oferta Barata Descartada P{page_number}",
+                        url=f"https://www.mercadolivre.com.br/p/MLBRAND{page_number}99",
+                        promotional_price=30.0,
+                        discount_percentage=10,
+                        rating=4.2,
+                    ),
+                ]
+            else:
+                items = [
+                    ProductItem(
+                        id="MLBNICHE100",
+                        name="Notebook Gamer Filtrado",
+                        url="https://www.mercadolivre.com.br/p/MLBNICHE100",
+                        promotional_price=3500.0,
+                        discount_percentage=20,
+                        rating=4.9,
+                    )
+                ]
+            return SearchResponse(
+                status="ok",
+                metadata=SearchMetadata(query=query, requested_limit=limit, total_returned=len(items), pages_visited=1, elapsed_seconds=0.02),
+                results=items,
+            )
+
+    sent_titles: list[str] = []
+
+    def mock_tg_handler(request: httpx.Request) -> httpx.Response:
+        import json
+        body = json.loads(request.content.decode("utf-8"))
+        sent_titles.append(str(body.get("caption") or body.get("text") or ""))
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": len(sent_titles)}})
+
+    orig_ml = source_registry.get("mercadolivre")
+    orig_tg = output_registry.get("telegram")
+    source_registry.register(RandomAndNicheMockSource())
+    output_registry.register(TelegramOutputSource(transport=httpx.MockTransport(mock_tg_handler), probe_images=False))
+
+    try:
+        scheduler = CycleScheduler()
+        random_cycle = test_storage.create_cycle(
+            CycleCreateRequest(
+                name="Ciclo Sem Nicho",
+                query="",
+                source_id="mercadolivre",
+                search_limit=10,
+                max_offers_per_run=1,
+                interval_minutes=5,
+                destination_ids=[dest.id or ""],
+                filters=CycleFilters(min_price=100.0, min_discount=15, min_rating=4.5),
+                deduplicate=True,
+            )
+        )
+        niche_cycle = test_storage.create_cycle(
+            CycleCreateRequest(
+                name="Ciclo Nichado Notebook",
+                query="notebook",
+                source_id="mercadolivre",
+                search_limit=10,
+                max_offers_per_run=1,
+                interval_minutes=5,
+                destination_ids=[dest.id or ""],
+                filters=CycleFilters(min_price=100.0, min_discount=15, min_rating=4.5),
+                deduplicate=True,
+            )
+        )
+
+        async def _run_both() -> None:
+            for _ in range(4):
+                ok, run_log, msg = await scheduler.execute_cycle_once(random_cycle.id)
+                assert ok is True, msg
+                assert run_log is not None and run_log.sent_count == 1
+
+            # Cada ciclo aleatório dispara uma busca nova (sem drenar backlog antigo) e nunca repete página consecutiva
+            assert len(search_calls) == 4
+            assert all(q == "" for q, _ in search_calls)
+            for idx in range(1, len(search_calls)):
+                assert search_calls[idx][1] != search_calls[idx - 1][1]
+            assert all("Nicho Antigo" not in t and "Barata Descartada" not in t for t in sent_titles)
+
+            # Agora executa o ciclo nichado e valida que a busca filtrada continua intacta
+            ok_n, run_n, msg_n = await scheduler.execute_cycle_once(niche_cycle.id)
+            assert ok_n is True, msg_n
+            assert run_n is not None and run_n.sent_count == 1
+            assert search_calls[-1][0] == "notebook"
+            assert "Notebook Gamer Filtrado" in sent_titles[-1]
+
+        asyncio.run(_run_both())
+    finally:
+        source_registry.register(orig_ml)
+        output_registry.register(orig_tg)

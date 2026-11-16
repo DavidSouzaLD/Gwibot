@@ -75,6 +75,7 @@ class MercadoLivreSearchSource(SearchSource):
         limit_per_keyword: int,
         page_number: int = 1,
         enrich_affiliates: bool = False,
+        randomize_general_route: bool = False,
     ) -> list[SearchResponse]:
         clean_kws = [k.strip() for k in keywords if k and k.strip()] or parse_keywords(",".join(keywords))
         if not clean_kws and keywords:
@@ -84,6 +85,7 @@ class MercadoLivreSearchSource(SearchSource):
             limit_per_keyword=limit_per_keyword,
             page_number=page_number,
             enrich_affiliates=enrich_affiliates,
+            randomize_general_route=randomize_general_route,
         )
 
 

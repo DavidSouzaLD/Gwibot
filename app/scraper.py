@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import random
 import re
 import time
 from typing import Any
@@ -364,14 +365,31 @@ class MercadoLivreScraper:
         except PlaywrightError:
             pass
 
+    GENERAL_DISCOVERY_ROUTES = (
+        None,               # /ofertas padrão
+        "lightning",        # /ofertas?promotion_type=lightning
+        "deal_of_the_day",  # /ofertas?promotion_type=deal_of_the_day
+        "top_discount",     # /ofertas?discount=20-100
+    )
+
     @staticmethod
-    def build_search_url(query: str, page_number: int = 1) -> str:
+    def build_search_url(query: str, page_number: int = 1, general_route: str | None = None) -> str:
         """Monta a URL de busca no Mercado Livre a partir de uma palavra-chave ou busca geral (vazia) com suporte a página."""
         clean_term = re.sub(r"[,;\r\n]+", " ", query).strip()
         if not clean_term:
+            base_ofertas = f"{settings.ml_base_url}/ofertas"
+            params: list[str] = []
+            if general_route == "lightning":
+                params.append("promotion_type=lightning")
+            elif general_route == "deal_of_the_day":
+                params.append("promotion_type=deal_of_the_day")
+            elif general_route == "top_discount":
+                params.append("discount=20-100")
             if page_number > 1:
-                return f"{settings.ml_base_url}/ofertas?page={page_number}"
-            return f"{settings.ml_base_url}/ofertas"
+                params.append(f"page={page_number}")
+            if params:
+                return f"{base_ofertas}?{'&'.join(params)}"
+            return base_ofertas
 
         normalized = "-".join(clean_term.split())
         encoded_slug = quote_plus(normalized)
@@ -443,6 +461,7 @@ class MercadoLivreScraper:
         limit: int,
         page_number: int,
         authenticated_session_used: bool,
+        general_route: str | None = None,
     ) -> SearchResponse:
         """Coleta produtos para uma única palavra-chave reutilizando uma `Page` aberta do Playwright."""
         start_time = time.perf_counter()
@@ -455,7 +474,7 @@ class MercadoLivreScraper:
         nav_ms_total = 0.0
         extract_ms_total = 0.0
 
-        search_url = self.build_search_url(query, page_number=page_number)
+        search_url = self.build_search_url(query, page_number=page_number, general_route=general_route)
         logger.info(
             "Iniciando busca no Mercado Livre | query='%s' | page=%d | limit=%d | auth_session=%s | url=%s",
             query,
@@ -614,6 +633,7 @@ class MercadoLivreScraper:
         keywords: list[str],
         limits: list[int],
         page_number: int = 1,
+        randomize_general_route: bool = False,
     ) -> list[SearchResponse]:
         """Executa a coleta de uma ou mais palavras-chave reutilizando o perfil persistente do Chromium (`user_data_dir`)."""
         authenticated_session_used = session_manager.is_authenticated()
@@ -662,12 +682,18 @@ class MercadoLivreScraper:
                         if idx > 0 and self._route_handler is None:
                             # Pequena pausa orgânica entre palavras-chave na mesma aba para evitar rate-limit
                             page.wait_for_timeout(350)
+                        selected_route = (
+                            random.choice(self.GENERAL_DISCOVERY_ROUTES)
+                            if (randomize_general_route and not kw.strip())
+                            else None
+                        )
                         sub_res = self._scrape_keyword_on_page(
                             page=page,
                             query=kw,
                             limit=kw_limit,
                             page_number=page_number,
                             authenticated_session_used=authenticated_session_used,
+                            general_route=selected_route,
                         )
                         responses.append(sub_res)
 
@@ -710,6 +736,7 @@ class MercadoLivreScraper:
         limit_per_keyword: int,
         page_number: int = 1,
         enrich_affiliates: bool = False,
+        randomize_general_route: bool = False,
     ) -> list[SearchResponse]:
         """Coleta múltiplas palavras-chave no perfil persistente do Chromium e persiste os produtos no banco."""
         from app.affiliates import ml_affiliate_provider
@@ -723,7 +750,7 @@ class MercadoLivreScraper:
                 return []
 
         now = time.monotonic()
-        use_cache = self._route_handler is None
+        use_cache = self._route_handler is None and not randomize_general_route
         cached_map: dict[str, SearchResponse] = {}
         missing_kws: list[str] = []
 
@@ -749,6 +776,7 @@ class MercadoLivreScraper:
                     missing_kws,
                     limits,
                     page_number,
+                    randomize_general_route,
                 )
             for kw, s_res in zip(missing_kws, batch_res):
                 scraped_map[kw] = s_res

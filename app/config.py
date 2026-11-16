@@ -34,7 +34,7 @@ class Settings:
 
     app_name: str = "Gwibot - Mercado Livre Scraper & Affiliate Hub"
     app_version: str = "2.0.0"
-    host: str = os.getenv("GWIBOT_HOST", "127.0.0.1")
+    host: str = os.getenv("GWIBOT_HOST", "0.0.0.0")
     port: int = int(os.getenv("GWIBOT_PORT", "8000"))
 
     # URLs do Mercado Livre Brasil

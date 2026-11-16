@@ -104,9 +104,49 @@
     const offersHistoryBody = document.getElementById("offersHistoryBody");
     const refreshHistoryBtn = document.getElementById("refreshHistoryBtn");
 
-    // Navigation breadcrumb
+    // Navigation breadcrumb & mobile drawer
     const crumbCurrentTitle = document.getElementById("crumbCurrentTitle");
     const sidebarViewsGroup = document.getElementById("sidebarViewsGroup");
+    const appSidebar = document.getElementById("appSidebar");
+    const sidebarBackdrop = document.getElementById("sidebarBackdrop");
+    const mobileMenuBtn = document.getElementById("mobileMenuBtn");
+    const mobileSidebarCloseBtn = document.getElementById("mobileSidebarCloseBtn");
+    const mainScrollableArea = document.getElementById("mainScrollableArea");
+
+    function openMobileSidebar() {
+        if (!appSidebar) return;
+        appSidebar.classList.add("open");
+        if (sidebarBackdrop) sidebarBackdrop.classList.add("open");
+        if (mobileMenuBtn) mobileMenuBtn.setAttribute("aria-expanded", "true");
+    }
+
+    function closeMobileSidebar() {
+        if (!appSidebar) return;
+        appSidebar.classList.remove("open");
+        if (sidebarBackdrop) sidebarBackdrop.classList.remove("open");
+        if (mobileMenuBtn) mobileMenuBtn.setAttribute("aria-expanded", "false");
+    }
+
+    if (mobileMenuBtn) {
+        mobileMenuBtn.addEventListener("click", () => {
+            if (appSidebar && appSidebar.classList.contains("open")) {
+                closeMobileSidebar();
+            } else {
+                openMobileSidebar();
+            }
+        });
+    }
+    if (mobileSidebarCloseBtn) {
+        mobileSidebarCloseBtn.addEventListener("click", closeMobileSidebar);
+    }
+    if (sidebarBackdrop) {
+        sidebarBackdrop.addEventListener("click", closeMobileSidebar);
+    }
+    document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && appSidebar && appSidebar.classList.contains("open")) {
+            closeMobileSidebar();
+        }
+    });
 
     let currentPayload = null;
     let authPollTimer = null;
@@ -148,37 +188,54 @@
         "sec-history": "Histórico & Métricas",
     };
 
-    // Sidebar navigation
-    document.querySelectorAll(".nav-pill").forEach((pill) => {
-        pill.addEventListener("click", () => {
-            document.querySelectorAll(".nav-pill").forEach((p) => p.classList.remove("active"));
-            pill.classList.add("active");
-            const targetId = pill.getAttribute("data-section");
-
-            if (crumbCurrentTitle && sectionTitles[targetId]) {
-                crumbCurrentTitle.textContent = sectionTitles[targetId];
-            }
-
-            // Toggle views group in sidebar only for search
-            if (sidebarViewsGroup) {
-                sidebarViewsGroup.classList.toggle("hidden", targetId !== "sec-search");
-            }
-
-            document.querySelectorAll(".app-section").forEach((sec) => {
-                sec.classList.toggle("hidden", sec.id !== targetId);
-            });
-
-            if (targetId === "sec-cycles") {
-                loadDestinationsAndCycles();
-            } else if (targetId === "sec-affiliates") {
-                loadAffiliateConfig();
-            } else if (targetId === "sec-config") {
-                loadDestinationsAndCycles();
-                loadPlatformTemplate(templatePlatformInput ? templatePlatformInput.value : "telegram");
-            } else if (targetId === "sec-history") {
-                loadHistory();
-            }
+    function activateSection(targetId) {
+        document.querySelectorAll(".nav-pill").forEach((p) => {
+            p.classList.toggle("active", p.getAttribute("data-section") === targetId);
         });
+        document.querySelectorAll(".mobile-nav-item").forEach((item) => {
+            item.classList.toggle("active", item.getAttribute("data-section") === targetId);
+        });
+
+        if (crumbCurrentTitle && sectionTitles[targetId]) {
+            crumbCurrentTitle.textContent = sectionTitles[targetId];
+        }
+
+        // Toggle views group in sidebar only for search
+        if (sidebarViewsGroup) {
+            sidebarViewsGroup.classList.toggle("hidden", targetId !== "sec-search");
+        }
+
+        document.querySelectorAll(".app-section").forEach((sec) => {
+            sec.classList.toggle("hidden", sec.id !== targetId);
+        });
+
+        if (mainScrollableArea) {
+            mainScrollableArea.scrollTop = 0;
+        }
+        closeMobileSidebar();
+
+        if (targetId === "sec-cycles") {
+            loadDestinationsAndCycles();
+        } else if (targetId === "sec-affiliates") {
+            loadAffiliateConfig();
+        } else if (targetId === "sec-config") {
+            loadDestinationsAndCycles();
+            loadPlatformTemplate(templatePlatformInput ? templatePlatformInput.value : "telegram");
+        } else if (targetId === "sec-history") {
+            loadHistory();
+        }
+    }
+
+    // Sidebar navigation & mobile bottom navigation
+    document.querySelectorAll(".nav-pill, .mobile-nav-item").forEach((pill) => {
+        pill.addEventListener("click", () => {
+            const targetId = pill.getAttribute("data-section");
+            if (targetId) activateSection(targetId);
+        });
+    });
+
+    document.querySelectorAll(".sidebar-view-tab").forEach((tab) => {
+        tab.addEventListener("click", closeMobileSidebar);
     });
 
     async function checkHealth() {

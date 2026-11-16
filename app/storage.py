@@ -1374,7 +1374,11 @@ class StorageService:
                 seen_dedup.add(dk)
                 results.append((dk, item))
 
-            # 3. Também verifica produtos não publicados no `products_catalog` que correspondam aos termos do ciclo
+            # 3. Apenas ciclos com nichos/palavras-chave configurados consultam o `products_catalog`.
+            # Ciclos sem nicho (modo aleatório) NUNCA reutilizam produtos de pesquisas anteriores do catálogo.
+            if not keywords:
+                return results
+
             # Exclui itens já filtrados ('filtered_out') e itens que estão na fila como 'failed' ou 'retry_wait' futuro
             blocked_q_rows = conn.execute(
                 """

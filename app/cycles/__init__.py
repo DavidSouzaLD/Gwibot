@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta
+import random
 import time
 import uuid
 
@@ -221,7 +222,8 @@ class CycleScheduler:
                     raise RuntimeError(f"Fonte '{source.display_name}' ainda não está ativa para coleta.")
 
                 keywords = parse_keywords(cycle.query)
-                if not keywords:
+                is_random_mode = len(keywords) == 0
+                if is_random_mode:
                     keywords = [""]
 
                 aff_provider = affiliate_registry.get(cycle.source_id)
@@ -265,7 +267,15 @@ class CycleScheduler:
                         len(candidates_to_send),
                     )
 
-                current_page = getattr(cycle, "last_page_offset", 1) or 1
+                last_offset = getattr(cycle, "last_page_offset", 1) or 1
+                if is_random_mode:
+                    # Modo aleatório: sorteia página inicial diferente da última para variar ofertas entre ciclos
+                    candidate_pages = [p for p in range(1, 16) if p != last_offset]
+                    current_page = random.choice(candidate_pages)
+                    visited_random_pages: set[int] = {current_page}
+                else:
+                    current_page = last_offset
+                    visited_random_pages = set()
                 # Paginação incremental conservadora: no máximo 2 páginas quando a fila local precisa de novos itens
                 max_pages_to_scan = 2
                 pages_scanned = 0
@@ -284,12 +294,29 @@ class CycleScheduler:
 
                     # ETAPA 1: Busca no Mercado Livre (reutilizando perfil persistente e salvando em products_catalog)
                     t_search_stage = time.perf_counter()
-                    batch_responses = await source.search_keywords_batch(
-                        keywords=keywords,
-                        limit_per_keyword=cycle.search_limit,
-                        page_number=current_page,
-                        enrich_affiliates=False,
-                    )
+                    if is_random_mode:
+                        try:
+                            batch_responses = await source.search_keywords_batch(
+                                keywords=keywords,
+                                limit_per_keyword=cycle.search_limit,
+                                page_number=current_page,
+                                enrich_affiliates=False,
+                                randomize_general_route=True,
+                            )
+                        except TypeError:
+                            batch_responses = await source.search_keywords_batch(
+                                keywords=keywords,
+                                limit_per_keyword=cycle.search_limit,
+                                page_number=current_page,
+                                enrich_affiliates=False,
+                            )
+                    else:
+                        batch_responses = await source.search_keywords_batch(
+                            keywords=keywords,
+                            limit_per_keyword=cycle.search_limit,
+                            page_number=current_page,
+                            enrich_affiliates=False,
+                        )
                     search_wall_ms = (time.perf_counter() - t_search_stage) * 1000.0
 
                     per_kw_buckets: list[list[ProductItem]] = []
@@ -345,6 +372,10 @@ class CycleScheduler:
                             cycle.name,
                             current_page,
                         )
+                        if is_random_mode and current_page > 1 and pages_scanned < max_pages_to_scan:
+                            current_page = 1
+                            visited_random_pages.add(1)
+                            continue
                         current_page = 1
                         break
 
@@ -454,9 +485,14 @@ class CycleScheduler:
                         current_page = 1
                         break
 
-                    current_page += 1
-                    if current_page > 6:
-                        current_page = 1
+                    if is_random_mode:
+                        remaining_pages = [p for p in range(1, 16) if p not in visited_random_pages]
+                        current_page = random.choice(remaining_pages) if remaining_pages else 1
+                        visited_random_pages.add(current_page)
+                    else:
+                        current_page += 1
+                        if current_page > 6:
+                            current_page = 1
 
                 # Garante que candidatos recuperados do banco sem link afiliado recebam conversão antes do envio
                 items_needing_aff = [
@@ -477,19 +513,6 @@ class CycleScheduler:
                             if it.affiliate_status == "generated" and it.affiliate_url
                         ]
 
-                # Persiste TODOS os candidatos inéditos na Fila de Pendentes (offer_queue)
-                # Os que excederem `max_offers_per_run` permanecem na fila para a próxima execução sem nova busca!
-                if candidates_to_send:
-                    storage_service.enqueue_pending_offers(
-                        cycle_id=cycle.id,
-                        cycle_name=cycle.name,
-                        source_id=cycle.source_id,
-                        candidates=candidates_to_send,
-                        destinations=destinations,
-                        resend_after_hours=cycle.resend_after_hours,
-                        deduplicate=cycle.deduplicate,
-                    )
-
                 # Filtra apenas candidatos que ainda precisam ser enviados a pelo menos 1 destino ativo
                 if destinations and cycle.deduplicate:
                     deliverable_candidates = [
@@ -505,6 +528,24 @@ class CycleScheduler:
                     ]
                 else:
                     deliverable_candidates = list(candidates_to_send)
+
+                if is_random_mode and len(deliverable_candidates) > 1:
+                    random.shuffle(deliverable_candidates)
+
+                selected_offers = deliverable_candidates[: cycle.max_offers_per_run]
+                # Em modo aleatório, enfileira apenas os itens selecionados para esta execução (evita drenar backlog antigo e garante busca aleatória nova a cada ciclo).
+                # Em modo nichado, persiste todos os candidatos inéditos na Fila de Pendentes (offer_queue).
+                to_enqueue = selected_offers if is_random_mode else candidates_to_send
+                if to_enqueue:
+                    storage_service.enqueue_pending_offers(
+                        cycle_id=cycle.id,
+                        cycle_name=cycle.name,
+                        source_id=cycle.source_id,
+                        candidates=to_enqueue,
+                        destinations=destinations,
+                        resend_after_hours=cycle.resend_after_hours,
+                        deduplicate=cycle.deduplicate,
+                    )
 
                 run_log.searched_count = total_searched
                 run_log.filtered_count = total_filtered
@@ -557,8 +598,7 @@ class CycleScheduler:
                     )
                     return False, run_log, err_msg
 
-                selected_offers = deliverable_candidates[: cycle.max_offers_per_run]
-                remaining_queued = max(0, len(deliverable_candidates) - len(selected_offers))
+                remaining_queued = 0 if is_random_mode else max(0, len(deliverable_candidates) - len(selected_offers))
                 logger.info(
                     "Ciclo '%s' | Fila & Deduplicação: %d disponíveis (%d buscados em %d pág.) -> %d selecionados para envio, %d mantidos na fila.",
                     cycle.name,
